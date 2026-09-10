@@ -2,6 +2,7 @@
 //! reproductor": decide que suena, que sigue y cuando adelantarse a resolverlo.
 
 use crate::backend::{Backend, Playback};
+use crate::lyrics::{Lyrics, LyricsProvider};
 use crate::resolver::{Resolver, Track};
 use anyhow::{bail, Result};
 use std::sync::Arc;
@@ -41,14 +42,20 @@ pub struct Status {
 pub struct Player {
     backend: Arc<dyn Backend>,
     resolver: Arc<dyn Resolver>,
+    lyrics: Arc<dyn LyricsProvider>,
     state: Mutex<State>,
 }
 
 impl Player {
-    pub fn new(backend: Arc<dyn Backend>, resolver: Arc<dyn Resolver>) -> Arc<Self> {
+    pub fn new(
+        backend: Arc<dyn Backend>,
+        resolver: Arc<dyn Resolver>,
+        lyrics: Arc<dyn LyricsProvider>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             backend,
             resolver,
+            lyrics,
             state: Mutex::new(State {
                 volume: 70.0,
                 ..Default::default()
@@ -246,6 +253,30 @@ impl Player {
         // Adelanta el primero: es el que se elige la mayoria de las veces.
         self.spawn_prefetch_at(0);
         Ok(found)
+    }
+
+    /// Letra de lo que suena ahora. `None` si no hay pista o no se encontro.
+    pub async fn lyrics(&self) -> Result<Option<Lyrics>> {
+        let Some(track) = self.state.lock().await.now_playing.clone() else {
+            return Ok(None);
+        };
+        self.lyrics.fetch(&track).await
+    }
+
+    /// Mueve el desfase de la letra actual y lo deja guardado.
+    pub async fn nudge_lyrics(&self, delta: f64) -> Result<f64> {
+        let Some(track) = self.state.lock().await.now_playing.clone() else {
+            anyhow::bail!("no hay nada sonando");
+        };
+        let current = self
+            .lyrics
+            .fetch(&track)
+            .await?
+            .map(|l| l.offset)
+            .unwrap_or(0.0);
+        let next = current + delta;
+        self.lyrics.save_offset(&track, next).await?;
+        Ok(next)
     }
 
     pub async fn queue(&self) -> Vec<Track> {

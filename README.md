@@ -50,8 +50,31 @@ siguiente se resuelve en segundo plano.
     surco status / queue / next / prev / toggle / stop
     surco vol 40
     surco seek 90
-    surco jump 3
+    surco lyrics                 # letras que siguen la cancion
     surco kill
+
+## Letras
+
+    surco lyrics
+
+Vista que sigue la canción y resalta el verso que suena. Teclas: `q` salir,
+`espacio` pausa, `←/→` 5s, `+/-` cuadrar la letra, `n/p` cambiar de pista.
+
+Vienen de [lrclib.net](https://lrclib.net) — pública, sin API key, con letras
+sincronizadas en formato LRC. Se cachean en `~/.cache/surco/lyrics/`.
+
+Lo difícil no es conseguir la letra, es **cuadrarla**:
+
+- Los títulos de YouTube vienen sucios (`7clouds - Twenty One Pilots - Chlorine
+  (Lyrics)`) y el canal suele ser la disquera, no el artista. La normalización
+  saca artista y canción; medida contra casos reales de este reproductor,
+  acierta **7 de 8**.
+- **Los videos no empiezan donde el track de estudio.** Medido: 15s de desfase
+  en Molotov, 20s en Zoé. No se corrige solo porque no se sabe si el desfase
+  está en la intro o repartido; se avisa en la cabecera y se cuadra con `+/-`.
+  El ajuste queda guardado por pista.
+- La búsqueda va en cascada: `get` con duración (lo más preciso, evita traer
+  otra versión) → `get` sin duración → `search`. La cabecera dice cuál acertó.
 
 El daemon es **uno por usuario**: el socket vive en `$XDG_RUNTIME_DIR`, así que
 cualquier terminal maneja el mismo reproductor — y cualquier `surco kill` corta
@@ -60,6 +83,11 @@ la música de todas.
 Para ver qué eventos manda mpv:
 
     SURCO_DEBUG=1 surco daemon
+
+`SURCO_SOCKET` reubica el socket, para levantar una instancia de pruebas sin
+tocar la que está sonando:
+
+    SURCO_SOCKET=/tmp/prueba.sock surco daemon
 
 ## Detalles que cuestan sangre
 
@@ -83,5 +111,7 @@ Para ver qué eventos manda mpv:
   descargar y postprocesar con ffmpeg, y nosotros streameamos directo. La vía
   real es consultar la API de SponsorBlock y hacer `seek` sobre los segmentos.
 - **Persistir la cola** entre reinicios del daemon.
+- **Letras a mano**: poder corregir un match malo eligiendo otro resultado de
+  lrclib, en vez de aguantar el que salió.
 - **Backend de biblioteca local** — la implementación más barata del trait, y
   la que hace que el proyecto no dependa de que YouTube siga cooperando.

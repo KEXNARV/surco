@@ -5,8 +5,10 @@
 
 mod backend;
 mod ipc;
+mod lyrics;
 mod player;
 mod resolver;
+mod view;
 
 use anyhow::{Context, Result};
 use backend::mpv::MpvBackend;
@@ -14,6 +16,7 @@ use backend::Backend as _;
 use clap::{Parser, Subcommand};
 use ipc::{Request, Response};
 use player::Player;
+use lyrics::lrclib::LrcLib;
 use resolver::ytdlp::YtDlpResolver;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -55,6 +58,8 @@ enum Cmd {
     Seek { seconds: f64 },
     /// Reproduce el indice N de la cola.
     Jump { index: usize },
+    /// Letras sincronizadas de lo que suena, siguiendo la cancion.
+    Lyrics,
     /// Apaga el daemon.
     Kill,
 }
@@ -64,6 +69,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Daemon => run_daemon().await,
+        // La vista toma la terminal y mantiene la conexion abierta, asi que no
+        // pasa por el camino de peticion-respuesta suelta.
+        Cmd::Lyrics => view::run_lyrics_view().await,
         other => run_client(to_request(other)).await,
     }
 }
@@ -91,7 +99,7 @@ fn to_request(cmd: Cmd) -> Request {
         Cmd::Seek { seconds } => Request::Seek { seconds },
         Cmd::Jump { index } => Request::Jump { index },
         Cmd::Kill => Request::Quit,
-        Cmd::Daemon => unreachable!("el daemon no pasa por aqui"),
+        Cmd::Daemon | Cmd::Lyrics => unreachable!("tienen su propio camino"),
     }
 }
 
@@ -106,7 +114,11 @@ async fn run_daemon() -> Result<()> {
 
     let mpv = MpvBackend::spawn(ipc::mpv_socket_path()).await?;
     let events = mpv.subscribe();
-    let player = Player::new(mpv.clone(), Arc::new(YtDlpResolver::default()));
+    let player = Player::new(
+        mpv.clone(),
+        Arc::new(YtDlpResolver::default()),
+        Arc::new(LrcLib::new()?),
+    );
     player.watch_end_of_track(events);
 
     let listener = UnixListener::bind(&sock)
@@ -215,6 +227,14 @@ async fn dispatch(player: &Arc<Player>, req: Request) -> Response {
         Request::ClearQueue => reply(player.clear_queue().await, "cola vacia"),
         Request::Volume { level } => reply(player.set_volume(level).await, format!("volumen {level}")),
         Request::Seek { seconds } => reply(player.seek(seconds).await, format!("posicion {seconds}s")),
+        Request::Lyrics => match player.lyrics().await {
+            Ok(l) => Response::data(l),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::LyricsOffset { delta } => match player.nudge_lyrics(delta).await {
+            Ok(off) => Response::ok(format!("desfase {off:+.1}s")),
+            Err(e) => Response::error(e.to_string()),
+        },
         Request::Quit => Response::ok("apagando"),
     }
 }

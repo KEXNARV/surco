@@ -27,6 +27,10 @@ pub enum Request {
     Seek { seconds: f64 },
     /// Salta a un indice concreto de la cola.
     Jump { index: usize },
+    /// Letra sincronizada de lo que suena.
+    Lyrics,
+    /// Corre la letra `delta` segundos y lo persiste.
+    LyricsOffset { delta: f64 },
     Quit,
 }
 
@@ -61,12 +65,24 @@ impl Response {
 
 /// Socket del daemon. En el runtime dir del usuario para que se limpie solo al
 /// cerrar sesion y no quede accesible a otros usuarios como pasaria en /tmp.
+///
+/// `SURCO_SOCKET` lo reubica, que es lo que permite levantar una instancia de
+/// pruebas sin tocar la que esta sonando.
 pub fn socket_path() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("SURCO_SOCKET") {
+        return std::path::PathBuf::from(p);
+    }
     let base = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir);
     base.join("surco.sock")
 }
 
+/// El socket de mpv acompaña al del daemon: dos instancias no pueden compartir
+/// el mismo mpv.
 pub fn mpv_socket_path() -> std::path::PathBuf {
-    let base = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir);
-    base.join("surco-mpv.sock")
+    let main = socket_path();
+    let name = main
+        .file_name()
+        .map(|n| format!("{}-mpv.sock", n.to_string_lossy()))
+        .unwrap_or_else(|| "surco-mpv.sock".into());
+    main.with_file_name(name)
 }
