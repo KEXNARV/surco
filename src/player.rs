@@ -66,17 +66,24 @@ impl Player {
         self.play_index(0).await
     }
 
-    pub async fn enqueue(&self, query: &str) -> Result<Track> {
+    pub async fn enqueue(self: &Arc<Self>, query: &str) -> Result<Track> {
         let mut found = self.resolver.search(query, 1).await?;
         let track = match found.drain(..).next() {
             Some(t) => t,
             None => bail!("sin resultados para \"{query}\""),
         };
-        let mut st = self.state.lock().await;
-        st.queue.push(track.clone());
-        // Si no habia nada mas en la cola, este es ahora el siguiente y el
-        // prefetch anterior (ninguno) queda invalidado.
-        st.next_up = None;
+        let next_idx = {
+            let mut st = self.state.lock().await;
+            // Añadir al final no reordena nada, asi que un prefetch en vuelo
+            // sigue siendo valido: solo importa si esta pista pasa a ser la
+            // siguiente, que es cuando conviene adelantarse a resolverla.
+            let becomes_next = st.current.map_or(false, |c| st.queue.len() == c + 1);
+            st.queue.push(track.clone());
+            becomes_next.then(|| st.queue.len() - 1)
+        };
+        if let Some(idx) = next_idx {
+            self.spawn_prefetch(idx);
+        }
         Ok(track)
     }
 
