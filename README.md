@@ -44,13 +44,22 @@ siguiente se resuelve en segundo plano.
     ./target/release/surco daemon &
 
     surco play weird fishes      # busca, suena la primera, el resto en cola
-    surco add kid a              # añade sin cortar
-    surco search boards of canada
+    surco search boards of canada  # llena la cola sin cortar lo que suena
+    surco jump 3                 # elige de lo que acabas de ver
+    surco add kid a              # añade al final, sin cortar
     surco status / queue / next / prev / toggle / stop
     surco vol 40
     surco seek 90
     surco jump 3
     surco kill
+
+El daemon es **uno por usuario**: el socket vive en `$XDG_RUNTIME_DIR`, así que
+cualquier terminal maneja el mismo reproductor — y cualquier `surco kill` corta
+la música de todas.
+
+Para ver qué eventos manda mpv:
+
+    SURCO_DEBUG=1 surco daemon
 
 ## Detalles que cuestan sangre
 

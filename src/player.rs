@@ -279,6 +279,9 @@ impl Player {
                 if msg.get("event").and_then(|v| v.as_str()) != Some("end-file") {
                     continue;
                 }
+                if std::env::var_os("SURCO_DEBUG").is_some() {
+                    eprintln!("surco[dbg] {msg}");
+                }
                 // Aqui esta la diferencia que importa: mpv manda `end-file`
                 // tanto cuando la pista acaba sola (reason "eof") como cuando
                 // nosotros cargamos otra encima ("stop") o al salir ("quit").
