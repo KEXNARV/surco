@@ -17,8 +17,13 @@ struct Resolved {
 #[derive(Default)]
 struct State {
     queue: Vec<Track>,
-    /// Indice en `queue` de lo que suena. `None` = nada cargado.
+    /// Indice en `queue` de lo que suena, cuando lo que suena viene de ella.
+    /// Una busqueda reemplaza la cola sin cortar el audio, y entonces esto
+    /// queda en `None` aunque siga habiendo musica.
     current: Option<usize>,
+    /// Lo que de verdad esta cargado en el motor. Sobrevive a que la cola
+    /// cambie debajo, para que el status nunca mienta.
+    now_playing: Option<Track>,
     /// La siguiente pista ya resuelta, para que el salto sea instantaneo.
     next_up: Option<Resolved>,
     volume: f64,
@@ -115,6 +120,7 @@ impl Player {
         let volume = {
             let mut st = self.state.lock().await;
             st.current = Some(idx);
+            st.now_playing = Some(track.clone());
             st.next_up = None;
             st.volume
         };
@@ -128,6 +134,16 @@ impl Player {
     /// Resuelve en segundo plano la URL de `idx` para que el cambio de pista no
     /// se coma los ~2.7s que tarda yt-dlp.
     fn spawn_prefetch(self: &Arc<Self>, idx: usize) {
+        self.prefetch(idx, true)
+    }
+
+    /// Igual, pero sin exigir que `idx` sea el siguiente de lo que suena. Lo
+    /// usa la busqueda, donde no hay pista actual dentro de la cola nueva.
+    fn spawn_prefetch_at(self: &Arc<Self>, idx: usize) {
+        self.prefetch(idx, false)
+    }
+
+    fn prefetch(self: &Arc<Self>, idx: usize, require_adjacent: bool) {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             let track = {
@@ -139,14 +155,18 @@ impl Player {
             };
             if let Ok(url) = me.resolver.stream_url(&track).await {
                 let mut st = me.state.lock().await;
-                // Puede haber cambiado de pista mientras resolviamos; solo
-                // guardamos si sigue siendo el siguiente esperado.
-                if st.current.map(|c| c + 1) == Some(idx) {
-                    st.next_up = Some(Resolved {
-                        track_id: track.id,
-                        url,
-                    });
+                // La cola puede haber cambiado mientras resolviamos: solo vale
+                // si ese indice sigue teniendo la misma pista.
+                if st.queue.get(idx).map(|t| &t.id) != Some(&track.id) {
+                    return;
                 }
+                if require_adjacent && st.current.map(|c| c + 1) != Some(idx) {
+                    return;
+                }
+                st.next_up = Some(Resolved {
+                    track_id: track.id,
+                    url,
+                });
             }
         });
     }
@@ -191,6 +211,7 @@ impl Player {
     pub async fn stop(&self) -> Result<()> {
         let mut st = self.state.lock().await;
         st.current = None;
+        st.now_playing = None;
         st.next_up = None;
         drop(st);
         self.backend.stop().await
@@ -201,16 +222,30 @@ impl Player {
         let st = self.state.lock().await;
         Ok(Status {
             playback,
-            current: st.current.and_then(|i| st.queue.get(i)).cloned(),
+            current: st.now_playing.clone(),
             position_in_queue: st.current,
             queue_len: st.queue.len(),
             volume: st.volume,
         })
     }
 
-    /// Busca sin tocar la reproduccion ni la cola.
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>> {
-        self.resolver.search(query, limit).await
+    /// Busca y deja los resultados en la cola, listos para `jump`, sin cortar
+    /// lo que suena. Antes esto devolvia una lista que no se podia accionar.
+    pub async fn search(self: &Arc<Self>, query: &str, limit: usize) -> Result<Vec<Track>> {
+        let found = self.resolver.search(query, limit).await?;
+        if found.is_empty() {
+            return Ok(found);
+        }
+        {
+            let mut st = self.state.lock().await;
+            st.queue = found.clone();
+            // Lo que suena ya no pertenece a esta cola, pero sigue sonando.
+            st.current = None;
+            st.next_up = None;
+        }
+        // Adelanta el primero: es el que se elige la mayoria de las veces.
+        self.spawn_prefetch_at(0);
+        Ok(found)
     }
 
     pub async fn queue(&self) -> Vec<Track> {
@@ -221,6 +256,7 @@ impl Player {
         let mut st = self.state.lock().await;
         st.queue.clear();
         st.current = None;
+        st.now_playing = None;
         st.next_up = None;
         drop(st);
         self.backend.stop().await

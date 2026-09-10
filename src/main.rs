@@ -227,6 +227,8 @@ fn reply(res: Result<()>, msg: impl Into<String>) -> Response {
 }
 
 async fn run_client(req: Request) -> Result<()> {
+    // Tras una busqueda conviene recordar que los resultados ya son accionables.
+    let hint_jump = matches!(req, Request::Search { .. });
     let sock = ipc::socket_path();
     let stream = UnixStream::connect(&sock).await.with_context(|| {
         format!(
@@ -248,7 +250,12 @@ async fn run_client(req: Request) -> Result<()> {
 
     match serde_json::from_str::<Response>(&line)? {
         Response::Ok { message } => println!("{message}"),
-        Response::Data { payload } => println!("{}", render(&payload)),
+        Response::Data { payload } => {
+            println!("{}", render(&payload));
+            if hint_jump && payload.as_array().is_some_and(|a| !a.is_empty()) {
+                println!("\n     elige con: surco jump N");
+            }
+        }
         Response::Error { message } => {
             eprintln!("error: {message}");
             std::process::exit(1);
