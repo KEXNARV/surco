@@ -103,15 +103,43 @@ fn to_request(cmd: Cmd) -> Request {
     }
 }
 
+/// Socket heredado de systemd por activacion. Cuando existe, el daemon no crea
+/// el suyo: systemd ya lo tiene escuchando desde antes de arrancarnos, y por
+/// eso el primer `surco play` puede levantar el servicio sin que hubiera nada
+/// corriendo.
+fn systemd_listener() -> Option<UnixListener> {
+    use std::os::fd::FromRawFd;
+
+    // LISTEN_PID evita adoptar fds que eran para nuestro padre.
+    let pid: u32 = std::env::var("LISTEN_PID").ok()?.parse().ok()?;
+    if pid != std::process::id() {
+        return None;
+    }
+    if std::env::var("LISTEN_FDS").ok()?.parse::<i32>().ok()? < 1 {
+        return None;
+    }
+
+    // SAFETY: systemd garantiza que el fd 3 (SD_LISTEN_FDS_START) es un socket
+    // ya escuchando y que nadie mas lo posee. Las comprobaciones de arriba
+    // aseguran que la asignacion era para este proceso.
+    let std_listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(3) };
+    std_listener.set_nonblocking(true).ok()?;
+    UnixListener::from_std(std_listener).ok()
+}
+
 async fn run_daemon() -> Result<()> {
     let sock = ipc::socket_path();
+    let inherited = systemd_listener();
 
-    // Si ya hay un daemon vivo escuchando ahi, no debemos pisarlo.
-    if UnixStream::connect(&sock).await.is_ok() {
-        anyhow::bail!("ya hay un daemon corriendo en {}", sock.display());
+    if inherited.is_none() {
+        // Si ya hay un daemon vivo escuchando ahi, no debemos pisarlo.
+        if UnixStream::connect(&sock).await.is_ok() {
+            anyhow::bail!("ya hay un daemon corriendo en {}", sock.display());
+        }
+        let _ = tokio::fs::remove_file(&sock).await;
     }
-    let _ = tokio::fs::remove_file(&sock).await;
 
+    let from_systemd = inherited.is_some();
     let mpv = MpvBackend::spawn(ipc::mpv_socket_path()).await?;
     let events = mpv.subscribe();
     let player = Player::new(
@@ -121,9 +149,18 @@ async fn run_daemon() -> Result<()> {
     );
     player.watch_end_of_track(events);
 
-    let listener = UnixListener::bind(&sock)
-        .with_context(|| format!("no se pudo abrir {}", sock.display()))?;
-    eprintln!("surco: escuchando en {}", sock.display());
+    let listener = match inherited {
+        Some(l) => {
+            eprintln!("surco: socket heredado de systemd");
+            l
+        }
+        None => {
+            let l = UnixListener::bind(&sock)
+                .with_context(|| format!("no se pudo abrir {}", sock.display()))?;
+            eprintln!("surco: escuchando en {}", sock.display());
+            l
+        }
+    };
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -144,7 +181,11 @@ async fn run_daemon() -> Result<()> {
 
     eprintln!("surco: cerrando");
     mpv.shutdown().await.ok();
-    let _ = tokio::fs::remove_file(&sock).await;
+    // Un socket de systemd lo administra systemd: borrarlo romperia la
+    // activacion de la siguiente vez.
+    if !from_systemd {
+        let _ = tokio::fs::remove_file(&sock).await;
+    }
     Ok(())
 }
 

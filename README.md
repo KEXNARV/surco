@@ -21,8 +21,12 @@ Por eso la fuente vive detrás de un trait y no cableada por el código.
     src/resolver/    trait Resolver — busca pistas y resuelve el stream
       ytdlp.rs       subprocesos de yt-dlp
     src/player.rs    cola, estado, prefetch, avance automático
+    src/lyrics/      trait LyricsProvider — letras sincronizadas
+      lrclib.rs      cliente de lrclib.net + normalización de títulos
+    src/view.rs      vista de letras en terminal
     src/ipc.rs       protocolo daemon <-> interfaz (JSON por línea)
     src/main.rs      daemon + CLI cliente
+    systemd/         unidades de activación por socket
 
 El daemon posee mpv y la cola. Cualquier interfaz habla el socket unix en
 `$XDG_RUNTIME_DIR/surco.sock` — el CLI incluido, o lo que venga después.
@@ -38,10 +42,32 @@ Números medidos en esta máquina:
 Los 2.7s son la razón de existir del prefetch: en cuanto empieza una pista, la
 siguiente se resuelve en segundo plano.
 
-## Uso
+## Instalación
 
     cargo build --release
-    ./target/release/surco daemon &
+    ln -sf "$PWD/target/release/surco" ~/.local/bin/surco
+    cp systemd/surco.{socket,service} ~/.config/systemd/user/
+    systemctl --user daemon-reload
+    systemctl --user enable --now surco.socket
+
+Con eso **no queda nada corriendo hasta que ejecutas un comando**: systemd
+tiene el socket escuchando y levanta el daemon al primer `surco` que llegue
+(medido: 0.13s). Sobrevive al cierre de la terminal porque su padre es systemd,
+no tu shell.
+
+`surco kill` lo apaga de verdad — no se reinicia, porque sale con código 0 — y
+el siguiente comando lo revive.
+
+Tras recompilar, `surco kill` basta para que el próximo comando use el binario
+nuevo (`~/.local/bin/surco` es un symlink a `target/release`).
+
+Sin systemd también funciona: `surco daemon &`, atado a la terminal.
+
+Para ver los logs:
+
+    journalctl --user -u surco -f
+
+## Uso
 
     surco play weird fishes      # busca, suena la primera, el resto en cola
     surco search boards of canada  # llena la cola sin cortar lo que suena

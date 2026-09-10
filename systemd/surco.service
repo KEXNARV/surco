@@ -1,0 +1,21 @@
+[Unit]
+Description=surco - reproductor de musica
+Documentation=https://github.com/kex/surco
+# El socket es quien nos arranca; sin el no hay a quien responder.
+Requires=surco.socket
+After=surco.socket pipewire.service
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/surco daemon
+# yt-dlp y mpv viven en /usr/bin; el PATH de la sesion no siempre llega aqui.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+# Si mpv o el daemon se caen, la musica se reanuda sin intervencion.
+Restart=on-failure
+RestartSec=2
+# `surco kill` es una salida limpia y pedida: no debe reiniciarse.
+SuccessExitStatus=0
+
+# Sin [Install] a proposito: solo se habilita surco.socket, y el servicio
+# arranca cuando llega el primer comando. Asi no hay nada corriendo mientras
+# no se use, ni mpv en idle desde el login.

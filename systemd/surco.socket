@@ -1,0 +1,14 @@
+[Unit]
+Description=Socket de control de surco
+Documentation=https://github.com/kex/surco
+
+[Socket]
+# Debe coincidir con ipc::socket_path(): $XDG_RUNTIME_DIR/surco.sock
+ListenStream=%t/surco.sock
+# Sin esto systemd borraria el socket antiguo y la activacion fallaria
+# cuando el daemon se reinicia.
+RemoveOnStop=true
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target
