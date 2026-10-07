@@ -19,8 +19,8 @@ struct State {
     /// Lo que de verdad esta cargado en el motor. Sobrevive a que la cola
     /// cambie debajo, para que el status nunca mienta.
     now_playing: Option<Track>,
-    /// La última pista que mpv no pudo abrir y ya se reintentó: no reintentar en bucle.
-    retried: Option<String>,
+    /// La última pista que mpv no pudo abrir y cuándo se reintentó: una vez, no en bucle.
+    retried: Option<(String, std::time::Instant)>,
     volume: f64,
     /// Cuándo empezó `now_playing`, para el historial.
     started_at: u64,
@@ -436,9 +436,12 @@ impl Player {
                 if msg.get("reason").and_then(|v| v.as_str()) == Some("error") {
                     let retry = {
                         let mut st = me.state.lock().await;
+                        // Otro intento solo si no se reintentó esta misma hace nada: antes
+                        // quedaba bloqueada para siempre tras el primer reintento.
+                        let fresh = |id: &String| st.retried.as_ref().is_some_and(|(r, at)| r == id && at.elapsed().as_secs() < 30);
                         match (st.current, st.now_playing.as_ref().map(|t| t.id.clone())) {
-                            (Some(idx), Some(id)) if st.retried.as_ref() != Some(&id) => {
-                                st.retried = Some(id.clone());
+                            (Some(idx), Some(id)) if !fresh(&id) => {
+                                st.retried = Some((id.clone(), std::time::Instant::now()));
                                 // Sin `now_playing` el reintento no deja en el historial un salto falso.
                                 st.now_playing = None;
                                 Some((idx, id))
@@ -446,6 +449,10 @@ impl Player {
                             _ => None,
                         }
                     };
+                    // La URL que falló no se vuelve a usar, haya reintento o no.
+                    if let Some(id) = me.state.lock().await.now_playing.as_ref().map(|t| t.id.clone()) {
+                        me.urls.forget(&id);
+                    }
                     if let Some((idx, id)) = retry {
                         me.urls.forget(&id);
                         if let Err(e) = me.play_index(idx).await {

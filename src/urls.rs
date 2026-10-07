@@ -3,6 +3,10 @@
 //! resolver. Aquí se guarda cada URL hasta que caduca (`expire=` en la propia URL, unas
 //! 6 h), y si dos pedidos llegan a la vez por la misma pista (pasar el mouse y luego hacer
 //! clic, o el prefetch y un salto) esperan a la misma llamada de yt-dlp en vez de lanzar dos.
+//!
+//! Ojo: a veces yt-dlp entrega una URL que YouTube solo deja leer en trozos chicos (hasta
+//! ~0.5 MB) y que a mpv le da 403. Guardada, esa canción no cargaba nunca. Un HEAD (~20 ms)
+//! la delata: 403 en la mala, 200 en la buena. Se revisa al resolver y al sacar de la caché.
 
 use crate::resolver::{Resolver, Track};
 use anyhow::Result;
@@ -18,14 +22,46 @@ const DEFAULT_TTL: u64 = 60 * 60;
 
 type Cell = Arc<OnceCell<(String, u64)>>;
 
-#[derive(Default)]
 pub struct Urls {
     cells: Mutex<HashMap<String, Cell>>,
+    http: reqwest::Client,
+}
+
+impl Default for Urls {
+    fn default() -> Self {
+        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4)).build().unwrap_or_default();
+        Self { cells: Default::default(), http }
+    }
 }
 
 impl Urls {
-    /// La URL de `track`: la guardada si sigue viva, la que ya se está resolviendo, o una nueva.
+    /// La URL de `track`, ya comprobada: la guardada si sigue viva y YouTube la acepta, la
+    /// que ya se está resolviendo, o una nueva.
     pub async fn get(&self, resolver: &dyn Resolver, track: &Track) -> Result<String> {
+        let url = self.cached(resolver, track).await?;
+        if self.usable(&url).await {
+            return Ok(url);
+        }
+        // Mala (recién resuelta o ya guardada): fuera, y una vez más desde cero.
+        self.forget(&track.id);
+        let url = self.cached(resolver, track).await?;
+        if self.usable(&url).await {
+            return Ok(url);
+        }
+        self.forget(&track.id);
+        anyhow::bail!("YouTube no deja abrir «{}» ahora mismo; prueba en un rato", track.title)
+    }
+
+    /// ¿YouTube deja leer la URL entera? Si el HEAD no llega (sin red, lento), se le da el
+    /// beneficio de la duda: que lo intente mpv.
+    async fn usable(&self, url: &str) -> bool {
+        match self.http.head(url).send().await {
+            Ok(r) => r.status() != reqwest::StatusCode::FORBIDDEN,
+            Err(_) => true,
+        }
+    }
+
+    async fn cached(&self, resolver: &dyn Resolver, track: &Track) -> Result<String> {
         let cell = {
             let mut cells = self.cells.lock().unwrap();
             let now = now();

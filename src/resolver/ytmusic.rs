@@ -138,7 +138,12 @@ fn radio_row(r: &Value) -> Option<Track> {
     let byline = r.get("longBylineText").map(runs).unwrap_or_default();
     let mut parts = byline.split(" • ");
     let artist = parts.next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-    let album = parts.next().map(str::trim).filter(|s| !s.is_empty() && s.parse::<u32>().is_err()).map(str::to_string);
+    // En los videos el segundo campo son las vistas ("55 M de visualizaciones"), no un álbum.
+    let album = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.parse::<u32>().is_err() && !s.contains("visualizaciones") && !s.contains("views"))
+        .map(str::to_string);
     let channel_id = r
         .pointer("/longBylineText/runs")
         .and_then(Value::as_array)
