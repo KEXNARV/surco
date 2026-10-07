@@ -2,18 +2,12 @@
 //! reproductor": decide que suena, que sigue y cuando adelantarse a resolverlo.
 
 use crate::backend::{Backend, Playback};
+use crate::library::{self, Library};
 use crate::lyrics::{Lyrics, LyricsProvider};
 use crate::resolver::{Resolver, Track};
 use anyhow::{bail, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-/// Una URL de stream ya resuelta, lista para cargar sin esperar a yt-dlp.
-#[derive(Clone)]
-struct Resolved {
-    track_id: String,
-    url: String,
-}
 
 #[derive(Default)]
 struct State {
@@ -25,9 +19,11 @@ struct State {
     /// Lo que de verdad esta cargado en el motor. Sobrevive a que la cola
     /// cambie debajo, para que el status nunca mienta.
     now_playing: Option<Track>,
-    /// La siguiente pista ya resuelta, para que el salto sea instantaneo.
-    next_up: Option<Resolved>,
+    /// La última pista que mpv no pudo abrir y ya se reintentó: no reintentar en bucle.
+    retried: Option<String>,
     volume: f64,
+    /// Cuándo empezó `now_playing`, para el historial.
+    started_at: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -43,7 +39,10 @@ pub struct Player {
     backend: Arc<dyn Backend>,
     resolver: Arc<dyn Resolver>,
     lyrics: Arc<dyn LyricsProvider>,
+    pub library: Arc<Library>,
+    pub catalog: crate::resolver::ytmusic::YtMusic,
     state: Mutex<State>,
+    urls: crate::urls::Urls,
 }
 
 impl Player {
@@ -51,11 +50,15 @@ impl Player {
         backend: Arc<dyn Backend>,
         resolver: Arc<dyn Resolver>,
         lyrics: Arc<dyn LyricsProvider>,
+        library: Arc<Library>,
     ) -> Arc<Self> {
         Arc::new(Self {
             backend,
             resolver,
             lyrics,
+            library,
+            catalog: crate::resolver::ytmusic::YtMusic::new().expect("cliente HTTP"),
+            urls: Default::default(),
             state: Mutex::new(State {
                 volume: 70.0,
                 ..Default::default()
@@ -73,9 +76,54 @@ impl Player {
             let mut st = self.state.lock().await;
             st.queue = found;
             st.current = None;
-            st.next_up = None;
         }
         self.play_index(0).await
+    }
+
+    /// Reemplaza la cola por `tracks` y reproduce desde `index`: lo que hace un clic en
+    /// una fila de una búsqueda, una playlist o los favoritos.
+    pub async fn play_tracks(self: &Arc<Self>, tracks: Vec<Track>, index: usize) -> Result<Track> {
+        if index >= tracks.len() {
+            bail!("la lista no tiene indice {index}");
+        }
+        {
+            let mut st = self.state.lock().await;
+            st.queue = tracks;
+            st.current = None;
+        }
+        self.play_index(index).await
+    }
+
+    /// Añade una pista ya conocida al final de la cola, sin buscar.
+    pub async fn enqueue_track(self: &Arc<Self>, track: Track) -> Result<()> {
+        let next_idx = {
+            let mut st = self.state.lock().await;
+            let becomes_next = st.current.map_or(false, |c| st.queue.len() == c + 1);
+            st.queue.push(track);
+            becomes_next.then(|| st.queue.len() - 1)
+        };
+        if let Some(idx) = next_idx {
+            self.spawn_prefetch(idx);
+        }
+        Ok(())
+    }
+
+    /// Deja en el historial lo que sonaba, con cuánto se escuchó. `end`: "eof", "skip"
+    /// o "stop". Lo que falle aquí no debe impedir cambiar de pista.
+    async fn finish(&self, end: &str) {
+        let Some((track, started)) = ({
+            let mut st = self.state.lock().await;
+            st.now_playing.take().map(|t| (t, st.started_at))
+        }) else {
+            return;
+        };
+        let pb = self.backend.playback().await.ok();
+        let duration = pb.as_ref().and_then(|p| p.duration).or(track.duration);
+        // Al terminar sola mpv ya reinició la posición: se escuchó entera.
+        let listened = if end == "eof" { duration.unwrap_or(0.0) } else { pb.map(|p| p.position).unwrap_or(0.0) };
+        if let Err(e) = self.library.record(track, started, listened, duration, end).await {
+            eprintln!("surco: no se pudo guardar el historial: {e}");
+        }
     }
 
     pub async fn enqueue(self: &Arc<Self>, query: &str) -> Result<Track> {
@@ -86,9 +134,8 @@ impl Player {
         };
         let next_idx = {
             let mut st = self.state.lock().await;
-            // Añadir al final no reordena nada, asi que un prefetch en vuelo
-            // sigue siendo valido: solo importa si esta pista pasa a ser la
-            // siguiente, que es cuando conviene adelantarse a resolverla.
+            // Solo importa si esta pista pasa a ser la siguiente, que es cuando
+            // conviene adelantarse a resolverla.
             let becomes_next = st.current.map_or(false, |c| st.queue.len() == c + 1);
             st.queue.push(track.clone());
             becomes_next.then(|| st.queue.len() - 1)
@@ -103,32 +150,20 @@ impl Player {
     pub async fn play_index(self: &Arc<Self>, idx: usize) -> Result<Track> {
         // El lock se suelta antes de la resolucion: yt-dlp tarda segundos y
         // mantenerlo bloquearia cualquier consulta de estado mientras tanto.
-        let (track, prefetched) = {
-            let st = self.state.lock().await;
-            let track = match st.queue.get(idx) {
-                Some(t) => t.clone(),
-                None => bail!("la cola no tiene indice {idx}"),
-            };
-            let hit = st
-                .next_up
-                .as_ref()
-                .filter(|r| r.track_id == track.id)
-                .cloned();
-            (track, hit)
+        let track = match self.state.lock().await.queue.get(idx) {
+            Some(t) => t.clone(),
+            None => bail!("la cola no tiene indice {idx}"),
         };
+        let url = self.urls.get(self.resolver.as_ref(), &track).await?;
 
-        let url = match prefetched {
-            Some(r) => r.url,
-            None => self.resolver.stream_url(&track).await?,
-        };
-
+        self.finish("skip").await;
         self.backend.load(&url).await?;
 
         let volume = {
             let mut st = self.state.lock().await;
             st.current = Some(idx);
             st.now_playing = Some(track.clone());
-            st.next_up = None;
+            st.started_at = library::timestamp();
             st.volume
         };
         // mpv olvida el volumen entre archivos con --no-config.
@@ -139,42 +174,24 @@ impl Player {
     }
 
     /// Resuelve en segundo plano la URL de `idx` para que el cambio de pista no
-    /// se coma los ~2.7s que tarda yt-dlp.
+    /// se coma lo que tarda yt-dlp. Si la cola cambia mientras tanto no pasa nada:
+    /// la URL queda guardada por pista, no por posición.
     fn spawn_prefetch(self: &Arc<Self>, idx: usize) {
-        self.prefetch(idx, true)
-    }
-
-    /// Igual, pero sin exigir que `idx` sea el siguiente de lo que suena. Lo
-    /// usa la busqueda, donde no hay pista actual dentro de la cola nueva.
-    fn spawn_prefetch_at(self: &Arc<Self>, idx: usize) {
-        self.prefetch(idx, false)
-    }
-
-    fn prefetch(self: &Arc<Self>, idx: usize, require_adjacent: bool) {
         let me = Arc::clone(self);
         tokio::spawn(async move {
-            let track = {
-                let st = me.state.lock().await;
-                match st.queue.get(idx) {
-                    Some(t) => t.clone(),
-                    None => return, // fin de la cola, nada que adelantar
-                }
+            let Some(track) = me.state.lock().await.queue.get(idx).cloned() else {
+                return; // fin de la cola, nada que adelantar
             };
-            if let Ok(url) = me.resolver.stream_url(&track).await {
-                let mut st = me.state.lock().await;
-                // La cola puede haber cambiado mientras resolviamos: solo vale
-                // si ese indice sigue teniendo la misma pista.
-                if st.queue.get(idx).map(|t| &t.id) != Some(&track.id) {
-                    return;
-                }
-                if require_adjacent && st.current.map(|c| c + 1) != Some(idx) {
-                    return;
-                }
-                st.next_up = Some(Resolved {
-                    track_id: track.id,
-                    url,
-                });
-            }
+            let _ = me.urls.get(me.resolver.as_ref(), &track).await;
+        });
+    }
+
+    /// Adelanta la URL de una pista que quizá suene pronto (la app la pide al dejar el
+    /// mouse encima), sin tocar la cola. Vuelve enseguida; la resolución sigue sola.
+    pub fn warm(self: &Arc<Self>, track: Track) {
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = me.urls.get(me.resolver.as_ref(), &track).await;
         });
     }
 
@@ -216,10 +233,10 @@ impl Player {
     }
 
     pub async fn stop(&self) -> Result<()> {
+        self.finish("stop").await;
         let mut st = self.state.lock().await;
         st.current = None;
         st.now_playing = None;
-        st.next_up = None;
         drop(st);
         self.backend.stop().await
     }
@@ -236,6 +253,47 @@ impl Player {
         })
     }
 
+    /// La página del artista: primero por el canal de la canción; si ese canal no es de
+    /// un artista (subidas de terceros), por el nombre.
+    pub async fn artist(&self, channel_id: Option<&str>, name: Option<&str>) -> Result<crate::resolver::ytmusic::Artist> {
+        if let Some(id) = channel_id {
+            if let Some(a) = self.catalog.artist(id).await? {
+                // El canal puede ser de un sello que YouTube Music trata como artista
+                // (88rising sube a Joji): solo vale si se llama como el artista buscado.
+                let same = |x: &str, y: &str| x.to_lowercase().contains(&y.to_lowercase()) || y.to_lowercase().contains(&x.to_lowercase());
+                // Un canal de YouTube que no es el del artista en Music (el de League of
+                // Legends) sale como "artista" pero solo con videos: si no trae canciones,
+                // se prueba la búsqueda por nombre y se queda con la que sí las tenga.
+                if name.is_none_or(|n| same(&a.name, n)) {
+                    if !a.top.is_empty() || name.is_none() {
+                        return Ok(a);
+                    }
+                    if let Ok(id) = self.catalog.find_artist(name.unwrap_or_default()).await {
+                        if let Ok(Some(b)) = self.catalog.artist(&id).await {
+                            if !b.top.is_empty() {
+                                return Ok(b);
+                            }
+                        }
+                    }
+                    return Ok(a);
+                }
+            }
+        }
+        let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
+            bail!("no sé de qué artista es esta canción");
+        };
+        let id = self.catalog.find_artist(name).await?;
+        match self.catalog.artist(&id).await? {
+            Some(a) => Ok(a),
+            None => bail!("no encontré la página de «{name}»"),
+        }
+    }
+
+    /// Solo busca: la cola queda como estaba.
+    pub async fn find(&self, query: &str, limit: usize) -> Result<Vec<Track>> {
+        self.resolver.search(query, limit).await
+    }
+
     /// Busca y deja los resultados en la cola, listos para `jump`, sin cortar
     /// lo que suena. Antes esto devolvia una lista que no se podia accionar.
     pub async fn search(self: &Arc<Self>, query: &str, limit: usize) -> Result<Vec<Track>> {
@@ -248,10 +306,9 @@ impl Player {
             st.queue = found.clone();
             // Lo que suena ya no pertenece a esta cola, pero sigue sonando.
             st.current = None;
-            st.next_up = None;
         }
         // Adelanta el primero: es el que se elige la mayoria de las veces.
-        self.spawn_prefetch_at(0);
+        self.spawn_prefetch(0);
         Ok(found)
     }
 
@@ -284,11 +341,11 @@ impl Player {
     }
 
     pub async fn clear_queue(&self) -> Result<()> {
+        self.finish("stop").await;
         let mut st = self.state.lock().await;
         st.queue.clear();
         st.current = None;
         st.now_playing = None;
-        st.next_up = None;
         drop(st);
         self.backend.stop().await
     }
@@ -317,9 +374,33 @@ impl Player {
                 // tanto cuando la pista acaba sola (reason "eof") como cuando
                 // nosotros cargamos otra encima ("stop") o al salir ("quit").
                 // Sin este filtro cada `next` avanzaba dos pistas.
+                // mpv no pudo abrir la URL: lo normal es que caducara o que cambiara la IP
+                // (las URLs van atadas a ella). Se olvida y se vuelve a resolver, una vez.
+                if msg.get("reason").and_then(|v| v.as_str()) == Some("error") {
+                    let retry = {
+                        let mut st = me.state.lock().await;
+                        match (st.current, st.now_playing.as_ref().map(|t| t.id.clone())) {
+                            (Some(idx), Some(id)) if st.retried.as_ref() != Some(&id) => {
+                                st.retried = Some(id.clone());
+                                // Sin `now_playing` el reintento no deja en el historial un salto falso.
+                                st.now_playing = None;
+                                Some((idx, id))
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some((idx, id)) = retry {
+                        me.urls.forget(&id);
+                        if let Err(e) = me.play_index(idx).await {
+                            eprintln!("surco: no se pudo reabrir la pista: {e}");
+                        }
+                    }
+                    continue;
+                }
                 if msg.get("reason").and_then(|v| v.as_str()) != Some("eof") {
                     continue;
                 }
+                me.finish("eof").await;
                 let has_next = {
                     let st = me.state.lock().await;
                     st.current.map_or(false, |c| c + 1 < st.queue.len())

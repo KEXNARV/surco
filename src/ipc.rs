@@ -3,6 +3,7 @@
 //! Deliberadamente tonto y textual. Cualquier interfaz futura -- TUI, Tauri,
 //! un script de Hyprland, `socat` a mano -- habla esto sin librerias.
 
+use crate::resolver::Track;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -31,6 +32,32 @@ pub enum Request {
     Lyrics,
     /// Corre la letra `delta` segundos y lo persiste.
     LyricsOffset { delta: f64 },
+    /// Busca sin tocar la cola (la de `search` deja los resultados en ella).
+    Find { query: String, limit: Option<usize> },
+    /// Reemplaza la cola por `tracks` y reproduce desde `index`.
+    PlayTracks { tracks: Vec<Track>, index: usize },
+    /// Añade una pista concreta a la cola.
+    EnqueueTrack { track: Track },
+    /// Adelanta la URL de una pista que quizá suene pronto, sin tocar la cola.
+    Warm { track: Track },
+    /// Favoritos y playlists.
+    Library,
+    Favorite { track: Track, on: bool },
+    PlaylistCreate { name: String },
+    PlaylistRename { id: String, name: String },
+    PlaylistDelete { id: String },
+    PlaylistAdd { id: String, track: Track },
+    PlaylistRemove { id: String, track_id: String },
+    /// Lo escuchado hace poco, sin repetir.
+    History { limit: Option<usize> },
+    /// Seguir o dejar de seguir a un artista.
+    Follow { artist: crate::library::ArtistRef, on: bool },
+    /// Página de artista: por su canal si se sabe, si no por el nombre.
+    Artist { channel_id: Option<String>, name: Option<String> },
+    /// El "ver todo" de una sección de artista.
+    Listing { id: String, params: Option<String> },
+    /// Un álbum de YouTube Music con sus canciones.
+    Album { id: String },
     Quit,
 }
 

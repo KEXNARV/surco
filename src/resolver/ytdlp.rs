@@ -12,16 +12,29 @@ use tokio::process::Command;
 
 pub struct YtDlpResolver {
     /// Formato en notacion de yt-dlp. Opus es lo que YouTube sirve nativo, asi
-    /// que pedirlo evita una transcodificacion.
+    /// que pedirlo evita una transcodificacion. El `/best` final es para los
+    /// videos con restriccion de edad: con sesion pero sin PO token solo queda
+    /// el formato 18 (mp4 360p con audio), y mpv corre con --no-video.
     format: String,
+    /// Navegador del que sacar la sesion de YouTube, en la notacion de
+    /// `--cookies-from-browser`. Sin el keyring explicito yt-dlp elige
+    /// BASICTEXT en Hyprland y no descifra nada.
+    cookies_browser: String,
 }
 
 impl Default for YtDlpResolver {
     fn default() -> Self {
         Self {
-            format: "bestaudio[acodec=opus]/bestaudio".to_string(),
+            format: "bestaudio[acodec=opus]/bestaudio/best".to_string(),
+            cookies_browser: std::env::var("SURCO_COOKIES_BROWSER")
+                .unwrap_or_else(|_| "chromium+gnomekeyring".to_string()),
         }
     }
+}
+
+/// YouTube pide sesion para los videos con restriccion de edad.
+fn needs_login(err: &anyhow::Error) -> bool {
+    err.to_string().contains("Sign in to confirm your age")
 }
 
 impl YtDlpResolver {
@@ -92,6 +105,7 @@ impl Resolver for YtDlpResolver {
                     album: text(e, "album"),
                     duration: num(e, "duration"),
                     channel: text(e, "channel").or_else(|| text(e, "uploader")),
+                    channel_id: text(e, "channel_id"),
                 })
             })
             .collect())
@@ -99,9 +113,17 @@ impl Resolver for YtDlpResolver {
 
     async fn stream_url(&self, track: &Track) -> Result<String> {
         let page = format!("https://www.youtube.com/watch?v={}", track.id);
-        let stdout = self
-            .run(&["-f", &self.format, "-g", "--no-warnings", &page])
-            .await?;
+        let args = ["-f", &self.format, "-g", "--no-warnings", &page];
+        // Las cookies solo en el reintento: descifrarlas cuesta ~3.5s y casi
+        // ninguna cancion las necesita.
+        let stdout = match self.run(&args).await {
+            Err(e) if needs_login(&e) => {
+                let mut with_cookies = vec!["--cookies-from-browser", &self.cookies_browser];
+                with_cookies.extend(args);
+                self.run(&with_cookies).await?
+            }
+            other => other?,
+        };
 
         // Con -f de audio solo debe venir una URL; si vinieran dos seria
         // porque el selector cayo a un formato con video.

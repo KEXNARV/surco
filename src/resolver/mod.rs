@@ -4,6 +4,7 @@
 //! de *como*. Un backend de biblioteca local implementaria esto leyendo tags.
 
 pub mod ytdlp;
+pub mod ytmusic;
 
 use anyhow::Result;
 
@@ -18,6 +19,9 @@ pub struct Track {
     pub duration: Option<f64>,
     /// Quien subio el contenido. Es lo unico que hay cuando no viene metadata.
     pub channel: Option<String>,
+    /// El canal de quien lo subió. Si es el del artista, lleva directo a su página.
+    #[serde(default)]
+    pub channel_id: Option<String>,
 }
 
 impl Track {

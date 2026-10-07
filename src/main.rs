@@ -5,9 +5,11 @@
 
 mod backend;
 mod ipc;
+mod library;
 mod lyrics;
 mod player;
 mod resolver;
+mod urls;
 mod view;
 
 use anyhow::{Context, Result};
@@ -146,6 +148,7 @@ async fn run_daemon() -> Result<()> {
         mpv.clone(),
         Arc::new(YtDlpResolver::default()),
         Arc::new(LrcLib::new()?),
+        Arc::new(library::Library::open().await?),
     );
     player.watch_end_of_track(events);
 
@@ -274,6 +277,48 @@ async fn dispatch(player: &Arc<Player>, req: Request) -> Response {
         },
         Request::LyricsOffset { delta } => match player.nudge_lyrics(delta).await {
             Ok(off) => Response::ok(format!("desfase {off:+.1}s")),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::Find { query, limit } => match player.find(&query, limit.unwrap_or(20)).await {
+            Ok(tracks) => Response::data(tracks),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::PlayTracks { tracks, index } => match player.play_tracks(tracks, index).await {
+            Ok(t) => Response::ok(format!("suena: {}", t.label())),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::EnqueueTrack { track } => reply(player.enqueue_track(track).await, "en cola"),
+        Request::Warm { track } => {
+            player.warm(track);
+            Response::ok("adelantando")
+        }
+        Request::Library => Response::data(player.library.data().await),
+        Request::Favorite { track, on } => {
+            reply(player.library.set_favorite(track, on).await, if on { "en favoritos" } else { "fuera de favoritos" })
+        }
+        Request::PlaylistCreate { name } => match player.library.create_playlist(&name).await {
+            Ok(p) => Response::data(p),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::PlaylistRename { id, name } => reply(player.library.rename_playlist(&id, &name).await, "renombrada"),
+        Request::PlaylistDelete { id } => reply(player.library.delete_playlist(&id).await, "borrada"),
+        Request::PlaylistAdd { id, track } => reply(player.library.playlist_add(&id, track).await, "añadida"),
+        Request::PlaylistRemove { id, track_id } => reply(player.library.playlist_remove(&id, &track_id).await, "quitada"),
+        Request::History { limit } => match player.library.recent(limit.unwrap_or(30)).await {
+            Ok(h) => Response::data(h),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::Follow { artist, on } => reply(player.library.set_following(artist, on).await, if on { "siguiendo" } else { "dejaste de seguir" }),
+        Request::Artist { channel_id, name } => match player.artist(channel_id.as_deref(), name.as_deref()).await {
+            Ok(a) => Response::data(a),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::Listing { id, params } => match player.catalog.listing(&id, params.as_deref()).await {
+            Ok(l) => Response::data(l),
+            Err(e) => Response::error(e.to_string()),
+        },
+        Request::Album { id } => match player.catalog.album(&id).await {
+            Ok(a) => Response::data(a),
             Err(e) => Response::error(e.to_string()),
         },
         Request::Quit => Response::ok("apagando"),
