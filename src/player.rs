@@ -43,7 +43,19 @@ pub struct Player {
     pub catalog: crate::resolver::ytmusic::YtMusic,
     state: Mutex<State>,
     urls: crate::urls::Urls,
+    /// La última lista "para ti" y cuándo se armó: se rehace pasado un rato o si se pide.
+    for_you: Mutex<Option<(std::time::Instant, ForYou)>>,
 }
+
+#[derive(Clone, serde::Serialize)]
+pub struct ForYou {
+    /// De qué canciones salió, para decirlo en la página.
+    pub seeds: Vec<Track>,
+    pub tracks: Vec<Track>,
+}
+
+/// Cuánto vale una lista "para ti" antes de rehacerla sola.
+const FOR_YOU_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 impl Player {
     pub fn new(
@@ -59,6 +71,7 @@ impl Player {
             library,
             catalog: crate::resolver::ytmusic::YtMusic::new().expect("cliente HTTP"),
             urls: Default::default(),
+            for_you: Mutex::new(None),
             state: Mutex::new(State {
                 volume: 70.0,
                 ..Default::default()
@@ -251,6 +264,50 @@ impl Player {
             queue_len: st.queue.len(),
             volume: st.volume,
         })
+    }
+
+    /// "Para ti": radios de YouTube Music de unas semillas, ordenadas por el historial
+    /// (para_ti.rs). `refresh` arma otra aunque la guardada siga vigente.
+    pub async fn for_you(self: &Arc<Self>, refresh: bool) -> Result<ForYou> {
+        let mut cached = self.for_you.lock().await;
+        if let Some((at, fy)) = cached.as_ref() {
+            if !refresh && at.elapsed() < FOR_YOU_TTL {
+                return Ok(fy.clone());
+            }
+        }
+        let history = self.library.history().await?;
+        let data = self.library.data().await;
+        let taste = crate::para_ti::Taste::new(&history, &data.favorites, &data.artists);
+        let mut seed = library::timestamp() ^ 0x9e37_79b9_7f4a_7c15;
+        let seeds = taste.seeds(&history, &data.favorites, || {
+            // xorshift: no hace falta más azar que este para elegir semillas.
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        });
+        let mut jobs = tokio::task::JoinSet::new();
+        for (i, s) in seeds.iter().enumerate() {
+            let me = Arc::clone(self);
+            let id = s.id.clone();
+            jobs.spawn(async move { (i, me.catalog.radio(&id).await) });
+        }
+        let mut radios = vec![vec![]; seeds.len()];
+        let mut failed = None;
+        while let Some(Ok((i, r))) = jobs.join_next().await {
+            match r {
+                Ok(list) => radios[i] = list,
+                Err(e) => failed = Some(e),
+            }
+        }
+        if radios.iter().all(Vec::is_empty) {
+            if let Some(e) = failed {
+                return Err(e);
+            }
+        }
+        let fy = ForYou { tracks: taste.rank(&seeds, &radios, library::timestamp()), seeds };
+        *cached = Some((std::time::Instant::now(), fy.clone()));
+        Ok(fy)
     }
 
     /// La página del artista: primero por el canal de la canción; si ese canal no es de

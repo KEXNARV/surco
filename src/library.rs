@@ -185,21 +185,20 @@ impl Library {
         Ok(())
     }
 
-    /// Lo escuchado hace poco, sin repetir pistas, lo más reciente primero.
-    pub async fn recent(&self, limit: usize) -> Result<Vec<Play>> {
+    /// Todo el historial, en orden: lo más viejo primero.
+    pub async fn history(&self) -> Result<Vec<Play>> {
         let text = match tokio::fs::read_to_string(self.dir.join("history.jsonl")).await {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(e.into()),
         };
+        Ok(text.lines().filter_map(|l| serde_json::from_str::<Play>(l).ok()).collect())
+    }
+
+    /// Lo escuchado hace poco, sin repetir pistas, lo más reciente primero.
+    pub async fn recent(&self, limit: usize) -> Result<Vec<Play>> {
         let mut seen = std::collections::HashSet::new();
-        Ok(text
-            .lines()
-            .rev()
-            .filter_map(|l| serde_json::from_str::<Play>(l).ok())
-            .filter(|p| seen.insert(p.track.id.clone()))
-            .take(limit)
-            .collect())
+        Ok(self.history().await?.into_iter().rev().filter(|p| seen.insert(p.track.id.clone())).take(limit).collect())
     }
 }
 

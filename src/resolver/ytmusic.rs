@@ -131,6 +131,30 @@ fn track_row(r: &Value, artist: Option<&str>, album: Option<&str>) -> Option<Tra
     })
 }
 
+/// Una fila de la radio (`playlistPanelVideoRenderer`). El byline es "Artista y Otro •
+/// Álbum • 2017"; el canal es el del primer artista.
+fn radio_row(r: &Value) -> Option<Track> {
+    let id = r.get("videoId")?.as_str()?.to_string();
+    let byline = r.get("longBylineText").map(runs).unwrap_or_default();
+    let mut parts = byline.split(" • ");
+    let artist = parts.next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let album = parts.next().map(str::trim).filter(|s| !s.is_empty() && s.parse::<u32>().is_err()).map(str::to_string);
+    let channel_id = r
+        .pointer("/longBylineText/runs")
+        .and_then(Value::as_array)
+        .and_then(|rs| rs.iter().find_map(|x| x.pointer("/navigationEndpoint/browseEndpoint/browseId")?.as_str().filter(|b| b.starts_with("UC"))))
+        .map(str::to_string);
+    Some(Track {
+        id,
+        title: r.get("title").map(runs).unwrap_or_default(),
+        artist,
+        album,
+        duration: r.get("lengthText").map(runs).and_then(|s| duration(&s)),
+        channel: None,
+        channel_id,
+    })
+}
+
 fn two_row(r: &Value) -> Option<Item> {
     let title = runs(r.get("title")?);
     let subtitle = r.get("subtitle").map(runs).unwrap_or_default();
@@ -171,6 +195,21 @@ impl YtMusic {
             bail!("YouTube Music respondió {}", res.status());
         }
         Ok(res.json().await?)
+    }
+
+    /// La radio de YouTube Music de una canción (`RDAMVM<id>`): ~50 parecidas, la propia
+    /// primero. Es lo que suena en music.youtube.com al darle a "Iniciar radio".
+    pub async fn radio(&self, video_id: &str) -> Result<Vec<Track>> {
+        let v = self
+            .call("next", json!({ "videoId": video_id, "playlistId": format!("RDAMVM{video_id}"), "isAudioOnly": true }))
+            .await?;
+        let mut out = vec![];
+        walk(&v, &mut |o| {
+            if let Some(t) = o.get("playlistPanelVideoRenderer").and_then(radio_row) {
+                out.push(t);
+            }
+        });
+        Ok(out)
     }
 
     /// El canal de un artista a partir de su nombre: el primero de la búsqueda de artistas.
@@ -365,5 +404,13 @@ mod tests {
         let al = y.album(&alb.id).await.unwrap();
         println!("{} — {} {} pistas: {:?}", al.title, al.artist, al.tracks.len(), al.tracks.first());
         assert!(!a.top.is_empty() && !al.tracks.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore] // red
+    async fn radio_real() {
+        let r = YtMusic::new().unwrap().radio("r7zTKRonHXM").await.unwrap();
+        println!("{} pistas; {:?}", r.len(), r.get(1));
+        assert!(r.len() > 20 && r[0].id == "r7zTKRonHXM" && r[1].artist.is_some() && r[1].duration.is_some());
     }
 }

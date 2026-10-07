@@ -38,6 +38,8 @@ pub enum Request {
     PlayTracks { tracks: Vec<Track>, index: usize },
     /// Añade una pista concreta a la cola.
     EnqueueTrack { track: Track },
+    /// Canciones nuevas según el historial; `refresh` arma otra mezcla.
+    ForYou { refresh: Option<bool> },
     /// Adelanta la URL de una pista que quizá suene pronto, sin tocar la cola.
     Warm { track: Track },
     /// Favoritos y playlists.

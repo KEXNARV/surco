@@ -104,6 +104,13 @@ pub struct Album {
     pub tracks: Vec<Track>,
 }
 
+/// "Para ti": de qué canciones salió y lo que trae.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ForYou {
+    pub seeds: Vec<Track>,
+    pub tracks: Vec<Track>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Line {
     pub at: f64,

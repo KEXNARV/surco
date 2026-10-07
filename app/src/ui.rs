@@ -189,6 +189,7 @@ impl App {
                 text("s u r c o").size(18).color(accent()),
                 Space::new().height(12),
                 nav("◇  Inicio", Page::Home),
+                nav("✦  Para ti", Page::ForYou),
                 nav("⌕  Buscar", Page::Search),
                 Space::new().height(16),
                 text("TU BIBLIOTECA").size(11).color(faint()),
@@ -206,6 +207,7 @@ impl App {
     fn main(&self) -> Element<'_, Msg> {
         let content: Element<Msg> = match &self.page {
             Page::Home => self.home(),
+            Page::ForYou => self.for_you_page(),
             Page::Search => self.search(),
             Page::Favorites => self.list_page("Favoritos", &format!("{} canciones", self.library.favorites.len()), &self.library.favorites, None),
             Page::Playlist(id) => match self.library.playlists.iter().find(|p| &p.id == id) {
@@ -242,6 +244,19 @@ impl App {
         if self.recent.is_empty() && self.library.favorites.is_empty() {
             col = col.push(text("Busca algo para empezar: / o ⌕ Buscar.").color(faint()));
         }
+        match &self.for_you {
+            Some(Ok(f)) if !f.tracks.is_empty() => {
+                col = col.push(section_title("Para ti", Some(Page::ForYou)));
+                col = col.push(self.cards(&f.tracks[..f.tracks.len().min(12)]));
+                col = col.push(Space::new().height(8));
+            }
+            None if self.mixing => {
+                col = col.push(text("Para ti").size(18));
+                col = col.push(self.waiting_line("armando tu mezcla…".into()));
+                col = col.push(Space::new().height(8));
+            }
+            _ => {}
+        }
         if !self.recent.is_empty() {
             col = col.push(text("Escuchado hace poco").size(18));
             col = col.push(self.cards(&self.recent));
@@ -253,6 +268,59 @@ impl App {
             col = col.push(self.cards(&top));
         }
         col.into()
+    }
+
+    /// "Para ti": la mezcla entera, de qué salió y el botón para otra.
+    fn for_you_page(&self) -> Element<'_, Msg> {
+        let f = match &self.for_you {
+            Some(Ok(f)) => f,
+            Some(Err(e)) => return column![text("Para ti").size(30), text(e.clone()).color(faint())].spacing(12).into(),
+            None => return column![text("Para ti").size(30), self.waiting_line("armando tu mezcla…".into())].spacing(16).into(),
+        };
+        if f.tracks.is_empty() {
+            return column![
+                text("Para ti").size(30),
+                text("Todavía no sé qué te gusta: marca canciones con ♥ o escucha algunas enteras y vuelve.").color(faint()),
+            ]
+            .spacing(12)
+            .into();
+        }
+        // Por artista, que se lee de un vistazo; sin artista, el título sin coletillas.
+        let mut from: Vec<String> = vec![];
+        for t in &f.seeds {
+            let name = match t.who() {
+                "" => clean(t).split([' ', '(', '[']).take(4).collect::<Vec<_>>().join(" "),
+                who => who.to_string(),
+            };
+            if !from.contains(&name) {
+                from.push(name);
+            }
+        }
+        let from = match from.as_slice() {
+            [] => String::new(),
+            [a] => format!("a partir de {a}"),
+            [rest @ .., last] => format!("a partir de {} y {last}", rest.join(", ")),
+        };
+        let remix: Element<Msg> = if self.mixing {
+            row![cargando::spinner(self.anim(), 14.0, accent()), text("mezclando…").size(13).color(faint())].spacing(8).align_y(Alignment::Center).into()
+        } else {
+            flat(text("↻  Otra mezcla").size(13).color(faint()), false).on_press(Msg::Remix).into()
+        };
+        let actions = row![play_button(Msg::PlayList(f.tracks.clone(), 0)), remix].spacing(10).align_y(Alignment::Center);
+        let header = row![
+            self.cover(&f.tracks[0].id, 140.0),
+            column![
+                text("MEZCLA").size(11).color(faint()),
+                text("Para ti").size(30),
+                text(short(&from, 90)).size(13).color(faint()),
+                Space::new().height(6),
+                actions,
+            ]
+            .spacing(4),
+        ]
+        .spacing(18)
+        .align_y(Alignment::End);
+        column![header, Space::new().height(10), self.track_list(&f.tracks, None)].spacing(8).into()
     }
 
     fn artist_page<'a>(&'a self, a: &'a Artist) -> Element<'a, Msg> {

@@ -65,3 +65,9 @@ solo para refinar el orden.
 - https://navidrome.org/docs/usage/integration/external-services/
 - https://spotdl.readthedocs.io/en/dev/reference/utils/matching/
 - https://arxiv.org/pdf/1711.05237 · https://arxiv.org/pdf/2409.07367
+
+## Estado
+
+- 2026-10-07: fase 1 hecha (`src/para_ti.rs`). La radio se pide con
+  `youtubei/v1/next` (la API que ya usa `ytmusic.rs`) y no con yt-dlp: ~1 s por
+  semilla, tres semillas en paralelo; la lista sale en ~1.4 s y se guarda 30 min.

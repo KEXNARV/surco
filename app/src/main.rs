@@ -14,7 +14,7 @@ mod ui;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use api::{Album, Artist, ArtistRef, Library, Listing, Lyrics, More, Track};
+use api::{Album, Artist, ArtistRef, ForYou, Library, Listing, Lyrics, More, Track};
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::image;
 use iced::{Color, Font, Size, Subscription, Task, event, time, window};
@@ -47,6 +47,7 @@ fn main() -> iced::Result {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Page {
     Home,
+    ForYou,
     Search,
     Favorites,
     Playlist(String),
@@ -94,6 +95,10 @@ pub struct App {
     pub artist: Option<Result<Artist, String>>,
     pub album: Option<Result<Album, String>>,
     pub listing: Option<Result<Listing, String>>,
+    /// "Para ti": `None` hasta la primera respuesta.
+    pub for_you: Option<Result<ForYou, String>>,
+    /// Se está armando una mezcla (la primera o "otra mezcla").
+    pub mixing: bool,
     pub query: String,
     pub results: Vec<Track>,
     pub searching: bool,
@@ -134,6 +139,9 @@ pub enum Msg {
     ArtistLoaded(Page, Result<Artist, String>),
     AlbumLoaded(Page, Result<Album, String>),
     ListingLoaded(Page, Result<Listing, String>),
+    ForYouLoaded(Result<ForYou, String>),
+    /// "Otra mezcla": semillas nuevas.
+    Remix,
     Query(String),
     Search,
     Results(Result<Vec<Track>, String>),
@@ -193,6 +201,8 @@ impl App {
             artist: None,
             album: None,
             listing: None,
+            for_you: None,
+            mixing: true,
             query: String::new(),
             results: vec![],
             searching: false,
@@ -211,12 +221,13 @@ impl App {
             warmed: HashMap::new(),
             born: Instant::now(),
         };
-        let mut boot = vec![Task::done(Msg::Poll), reload_library(), reload_recent()];
+        let mut boot = vec![Task::done(Msg::Poll), reload_library(), reload_recent(), load_for_you(false)];
         // `SURCO_INICIO`, para capturas de desarrollo: `completa`, `favoritos`, `buscar=<texto>`,
         // `artista=<nombre_con_guiones_bajos>`.
         match std::env::var("SURCO_INICIO").ok().as_deref() {
             Some("completa") => boot.push(Task::done(Msg::Full(true))),
             Some("favoritos") => boot.push(Task::done(Msg::Nav(Page::Favorites))),
+            Some("parati") => boot.push(Task::done(Msg::Nav(Page::ForYou))),
             Some(q) if q.starts_with("artista=") => boot.push(Task::done(Msg::Nav(Page::Artist(None, q["artista=".len()..].replace('_', " "))))),
             Some(q) if q.starts_with("album=") => boot.push(Task::done(Msg::Nav(Page::Album(q["album=".len()..].to_string())))),
             Some(q) if q.starts_with("buscar=") => {
@@ -267,6 +278,7 @@ impl App {
     fn waiting(&self) -> bool {
         self.busy()
             || self.searching
+            || self.mixing && matches!(self.page, Page::Home | Page::ForYou)
             || matches!(self.page, Page::Artist(..)) && self.artist.is_none()
             || matches!(self.page, Page::Album(_)) && self.album.is_none()
             || matches!(self.page, Page::Listing(..)) && self.listing.is_none()
@@ -412,6 +424,25 @@ impl App {
                     };
                     self.album = Some(r);
                     return t.unwrap_or_else(Task::none);
+                }
+            }
+            Msg::ForYouLoaded(r) => {
+                self.mixing = false;
+                let t = match &r {
+                    Ok(f) => self.want_thumbs(&f.tracks.clone()),
+                    Err(_) => Task::none(),
+                };
+                // Si falla una mezcla nueva, queda la anterior y se avisa.
+                match (r, &self.for_you) {
+                    (Err(e), Some(Ok(_))) => self.notify(e),
+                    (r, _) => self.for_you = Some(r),
+                }
+                return t;
+            }
+            Msg::Remix => {
+                if !self.mixing {
+                    self.mixing = true;
+                    return load_for_you(true);
                 }
             }
             Msg::Query(q) => self.query = q,
@@ -658,6 +689,10 @@ impl App {
 
 fn reload_library() -> Task<Msg> {
     Task::perform(api::get(api::cmd("library")), Msg::Library)
+}
+
+fn load_for_you(refresh: bool) -> Task<Msg> {
+    Task::perform(api::get(json!({ "cmd": "for_you", "refresh": refresh })), Msg::ForYouLoaded)
 }
 
 fn reload_recent() -> Task<Msg> {

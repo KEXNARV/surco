@@ -6,6 +6,7 @@
 mod backend;
 mod ipc;
 mod library;
+mod para_ti;
 mod lyrics;
 mod player;
 mod resolver;
@@ -288,6 +289,10 @@ async fn dispatch(player: &Arc<Player>, req: Request) -> Response {
             Err(e) => Response::error(e.to_string()),
         },
         Request::EnqueueTrack { track } => reply(player.enqueue_track(track).await, "en cola"),
+        Request::ForYou { refresh } => match player.for_you(refresh.unwrap_or(false)).await {
+            Ok(f) => Response::data(f),
+            Err(e) => Response::error(e.to_string()),
+        },
         Request::Warm { track } => {
             player.warm(track);
             Response::ok("adelantando")
