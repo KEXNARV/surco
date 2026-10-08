@@ -60,10 +60,11 @@ pub struct Taste {
     /// Afinidad por artista: positiva si lo escucha entero o lo marcó, negativa si lo salta.
     artists: HashMap<String, f64>,
     favorites: HashSet<String>,
+    disliked: HashSet<String>,
 }
 
 impl Taste {
-    pub fn new(history: &[Play], favorites: &[Track], followed: &[ArtistRef]) -> Self {
+    pub fn new(history: &[Play], favorites: &[Track], followed: &[ArtistRef], disliked: &[Track]) -> Self {
         let mut tracks: HashMap<String, Stats> = HashMap::new();
         let mut artists: HashMap<String, f64> = HashMap::new();
         for p in history {
@@ -84,8 +85,16 @@ impl Taste {
         for a in followed {
             *artists.entry(a.name.to_lowercase()).or_default() += 4.0;
         }
+        for t in disliked {
+            *artists.entry(main_artist(t)).or_default() -= 1.5;
+        }
         artists.remove("");
-        Self { tracks, artists, favorites: favorites.iter().map(|t| t.id.clone()).collect() }
+        Self {
+            tracks,
+            artists,
+            favorites: favorites.iter().map(|t| t.id.clone()).collect(),
+            disliked: disliked.iter().map(|t| t.id.clone()).collect(),
+        }
     }
 
     /// Las semillas: entre favoritos y lo escuchado entero, al azar pero pesando cuánto gusta,
@@ -95,7 +104,7 @@ impl Taste {
         let mut seen: HashSet<String> = favorites.iter().map(|t| t.id.clone()).collect();
         for p in history.iter().rev() {
             let s = self.tracks.get(&p.track.id).copied().unwrap_or_default();
-            if s.completes > 0 && s.skips < 2 && seen.insert(p.track.id.clone()) {
+            if s.completes > 0 && s.skips < 2 && !self.disliked.contains(&p.track.id) && seen.insert(p.track.id.clone()) {
                 pool.push((p.track.clone(), s.completes as f64));
             }
         }
@@ -123,7 +132,7 @@ impl Taste {
         let mut score: HashMap<String, (f64, Track)> = HashMap::new();
         for radio in radios {
             for (pos, t) in radio.iter().enumerate() {
-                if seed_ids.contains(t.id.as_str()) || self.favorites.contains(&t.id) {
+                if seed_ids.contains(t.id.as_str()) || self.favorites.contains(&t.id) || self.disliked.contains(&t.id) {
                     continue;
                 }
                 let s = self.tracks.get(&t.id).copied().unwrap_or_default();
@@ -212,7 +221,7 @@ mod tests {
             play(t("reciente", "Y"), now - 3600, 200.0, "eof"),
         ];
         let favs = vec![t("fav", "Z")];
-        let taste = Taste::new(&hist, &favs, &[]);
+        let taste = Taste::new(&hist, &favs, &[], &[]);
         let seed = t("semilla", "Z");
         let radio = vec![seed.clone(), t("salta", "X"), t("reciente", "Y"), t("fav", "Z"), t("nueva", "W")];
         let ids: Vec<String> = taste.rank(&[seed], &[radio], now).into_iter().map(|t| t.id).collect();
@@ -220,9 +229,18 @@ mod tests {
     }
 
     #[test]
+    fn fuera_las_que_no_gustan_y_su_artista_baja() {
+        let taste = Taste::new(&[], &[], &[], &[t("mala", "Malo")]);
+        let seed = t("semilla", "Z");
+        let radio = vec![seed.clone(), t("mala", "Malo"), t("otra_del_malo", "Malo"), t("neutra", "W")];
+        let ids: Vec<String> = taste.rank(&[seed], &[radio], 0).into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["neutra", "otra_del_malo"]);
+    }
+
+    #[test]
     fn sube_lo_que_sale_en_varias_radios_y_los_artistas_queridos() {
         let favs = vec![t("f1", "Querido")];
-        let taste = Taste::new(&[], &favs, &[]);
+        let taste = Taste::new(&[], &favs, &[], &[]);
         let r1 = vec![t("s1", "A"), t("comun", "B"), t("solo1", "C")];
         let r2 = vec![t("s2", "D"), t("solo2", "E"), t("comun", "B")];
         let r3 = vec![t("s3", "F"), t("x", "G"), t("y", "H"), t("del_querido", "Querido")];
@@ -234,7 +252,7 @@ mod tests {
 
     #[test]
     fn no_mas_de_dos_por_artista_ni_seguidas() {
-        let taste = Taste::new(&[], &[], &[]);
+        let taste = Taste::new(&[], &[], &[], &[]);
         let radio: Vec<Track> = std::iter::once(t("s", "S"))
             .chain((0..5).map(|i| t(&format!("a{i}"), "A")))
             .chain((0..3).map(|i| t(&format!("b{i}"), "B")))
@@ -247,7 +265,7 @@ mod tests {
     #[test]
     fn semillas_de_artistas_distintos() {
         let favs = vec![t("a1", "A"), t("a2", "A"), t("b1", "B"), t("c1", "C")];
-        let taste = Taste::new(&[], &favs, &[]);
+        let taste = Taste::new(&[], &favs, &[], &[]);
         let mut x = 0.0;
         let seeds = taste.seeds(&[], &favs, || {
             x = (x + 0.37) % 1.0;

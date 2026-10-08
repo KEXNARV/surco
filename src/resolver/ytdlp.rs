@@ -112,8 +112,20 @@ impl Resolver for YtDlpResolver {
     }
 
     async fn stream_url(&self, track: &Track) -> Result<String> {
+        self.url(track, &self.format).await
+    }
+
+    /// WebM (VP9) hasta 1080p: en el MP4 fragmentado de YouTube GStreamer no puede saltar
+    /// leyendo por HTTP, y en WebM sí. La NVIDIA lo decodifica (nvvp9dec).
+    async fn video_url(&self, track: &Track) -> Result<String> {
+        self.url(track, "bestvideo[height<=1080][ext=webm]/bestvideo[height<=1080]").await
+    }
+}
+
+impl YtDlpResolver {
+    async fn url(&self, track: &Track, format: &str) -> Result<String> {
         let page = format!("https://www.youtube.com/watch?v={}", track.id);
-        let args = ["-f", &self.format, "-g", "--no-warnings", &page];
+        let args = ["-f", format, "-g", "--no-warnings", &page];
         // Las cookies solo en el reintento: descifrarlas cuesta ~3.5s y casi
         // ninguna cancion las necesita.
         let stdout = match self.run(&args).await {
@@ -125,8 +137,8 @@ impl Resolver for YtDlpResolver {
             other => other?,
         };
 
-        // Con -f de audio solo debe venir una URL; si vinieran dos seria
-        // porque el selector cayo a un formato con video.
+        // Con un solo formato debe venir una URL; si vinieran dos seria
+        // porque el selector cayo a una combinacion de audio y video.
         String::from_utf8_lossy(&stdout)
             .lines()
             .map(str::trim)

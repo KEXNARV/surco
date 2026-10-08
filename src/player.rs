@@ -43,6 +43,7 @@ pub struct Player {
     pub catalog: crate::resolver::ytmusic::YtMusic,
     state: Mutex<State>,
     urls: crate::urls::Urls,
+    video_urls: crate::urls::Urls,
     /// La última lista "para ti" y cuándo se armó: se rehace pasado un rato o si se pide.
     for_you: Mutex<Option<(std::time::Instant, ForYou)>>,
 }
@@ -71,6 +72,7 @@ impl Player {
             library,
             catalog: crate::resolver::ytmusic::YtMusic::new().expect("cliente HTTP"),
             urls: Default::default(),
+            video_urls: crate::urls::Urls::video(),
             for_you: Mutex::new(None),
             state: Mutex::new(State {
                 volume: 70.0,
@@ -208,12 +210,33 @@ impl Player {
         });
     }
 
+    /// La siguiente de la cola, saltando las que no te gustan.
     pub async fn next(self: &Arc<Self>) -> Result<Track> {
-        let idx = match self.state.lock().await.current {
-            Some(c) => c + 1,
-            None => 0,
+        let (start, queue) = {
+            let st = self.state.lock().await;
+            (st.current.map_or(0, |c| c + 1), st.queue.clone())
         };
-        self.play_index(idx).await
+        let disliked = self.library.data().await.disliked;
+        let idx = (start..queue.len()).find(|&i| !disliked.iter().any(|d| d.id == queue[i].id));
+        match idx {
+            Some(i) => self.play_index(i).await,
+            None => bail!("no queda nada en la cola"),
+        }
+    }
+
+    pub async fn dislike(self: &Arc<Self>, track: Track, on: bool) -> Result<()> {
+        let id = track.id.clone();
+        self.library.set_disliked(track, on).await?;
+        let playing = self.state.lock().await.now_playing.as_ref().is_some_and(|t| t.id == id);
+        if on && playing {
+            // Sin siguiente, que al menos deje de sonar.
+            if self.next().await.is_err() {
+                self.stop().await?;
+            }
+        }
+        // "Para ti" se rehace sin ella la próxima vez que se pida.
+        *self.for_you.lock().await = None;
+        Ok(())
     }
 
     pub async fn prev(self: &Arc<Self>) -> Result<Track> {
@@ -254,6 +277,11 @@ impl Player {
         self.backend.stop().await
     }
 
+    /// URL de solo video de una pista, comprobada y guardada como las de audio.
+    pub async fn video_url(&self, track: &Track) -> Result<String> {
+        self.video_urls.get(self.resolver.as_ref(), track).await
+    }
+
     pub async fn status(&self) -> Result<Status> {
         let playback = self.backend.playback().await?;
         let st = self.state.lock().await;
@@ -277,7 +305,7 @@ impl Player {
         }
         let history = self.library.history().await?;
         let data = self.library.data().await;
-        let taste = crate::para_ti::Taste::new(&history, &data.favorites, &data.artists);
+        let taste = crate::para_ti::Taste::new(&history, &data.favorites, &data.artists, &data.disliked);
         let mut seed = library::timestamp() ^ 0x9e37_79b9_7f4a_7c15;
         let seeds = taste.seeds(&history, &data.favorites, || {
             // xorshift: no hace falta más azar que este para elegir semillas.

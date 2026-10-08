@@ -33,6 +33,9 @@ pub struct Data {
     pub playlists: Vec<Playlist>,
     #[serde(default)]
     pub artists: Vec<ArtistRef>,
+    /// Las que no te gustan: no suenan al avanzar la cola ni salen en "para ti".
+    #[serde(default)]
+    pub disliked: Vec<Track>,
 }
 
 /// Una reproducción terminada: cuánto se escuchó de cuánto. Un salto antes de los
@@ -96,8 +99,22 @@ impl Library {
         self.edit(|d| {
             d.favorites.retain(|t| t.id != track.id);
             if on {
+                d.disliked.retain(|t| t.id != track.id);
                 // Lo último que marcaste va primero, como en Spotify.
                 d.favorites.insert(0, track);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Marcar una como "no me gusta" la saca de favoritos: no puede ser las dos cosas.
+    pub async fn set_disliked(&self, track: Track, on: bool) -> Result<()> {
+        self.edit(|d| {
+            d.disliked.retain(|t| t.id != track.id);
+            if on {
+                d.favorites.retain(|t| t.id != track.id);
+                d.disliked.insert(0, track);
             }
             Ok(())
         })

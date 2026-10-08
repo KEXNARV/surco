@@ -10,6 +10,7 @@ mod nucleo;
 mod puntos;
 mod theme;
 mod ui;
+mod video;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -109,6 +110,19 @@ pub struct App {
     pub thumbs: HashMap<String, Thumb>,
     /// Vista completa: el núcleo grande y la letra.
     pub full: bool,
+    /// Barra lateral reducida a iconos.
+    pub rail: bool,
+    /// En la vista completa, el video en vez del núcleo.
+    pub video_mode: bool,
+    pub video_layout: video::Layout,
+    /// A dónde vuelve al salir de pantalla completa.
+    video_back: video::Layout,
+    /// Último movimiento del mouse: en pantalla completa los controles se ven un rato después.
+    pub mouse_at: Instant,
+    /// El video de la pista que suena (por id), mientras se ve.
+    pub video: Option<(String, video::State)>,
+    /// Cuándo llegó el último status, para adelantar su posición.
+    status_at: Instant,
     pub lyrics: Option<Lyrics>,
     lyrics_for: Option<String>,
     /// Mientras se arrastra la barra de progreso o el volumen, el valor que se ve.
@@ -148,6 +162,7 @@ pub enum Msg {
     PlayList(Vec<Track>, usize),
     Enqueue(Track),
     Favorite(Track, bool),
+    Dislike(Track, bool),
     Follow(ArtistRef, bool),
     Menu(Option<String>),
     AddTo(String, Track),
@@ -161,6 +176,13 @@ pub enum Msg {
     Volume(f32),
     VolumeDone,
     Full(bool),
+    Rail(bool),
+    VideoMode(bool),
+    VideoTick,
+    VideoLayout(video::Layout),
+    MouseMoved,
+    VideoUrl(String, Result<String, String>),
+    VideoOpened(String, Result<video::Loaded, String>),
     Lyrics(String, Option<Lyrics>),
     Thumb(String, Option<Vec<u8>>),
     /// Respuesta de una orden: si cambió la biblioteca, se recarga.
@@ -210,6 +232,13 @@ impl App {
             menu: None,
             thumbs: HashMap::new(),
             full: false,
+            rail: false,
+            video_mode: false,
+            video_layout: video::Layout::Side,
+            video_back: video::Layout::Side,
+            mouse_at: Instant::now(),
+            video: None,
+            status_at: Instant::now(),
             lyrics: None,
             lyrics_for: None,
             seeking: None,
@@ -222,10 +251,14 @@ impl App {
             born: Instant::now(),
         };
         let mut boot = vec![Task::done(Msg::Poll), reload_library(), reload_recent(), load_for_you(false)];
-        // `SURCO_INICIO`, para capturas de desarrollo: `completa`, `favoritos`, `buscar=<texto>`,
+        // `SURCO_INICIO`, para capturas de desarrollo: `completa`, `video`, `favoritos`, `buscar=<texto>`,
         // `artista=<nombre_con_guiones_bajos>`.
         match std::env::var("SURCO_INICIO").ok().as_deref() {
             Some("completa") => boot.push(Task::done(Msg::Full(true))),
+            Some("video") => {
+                boot.push(Task::done(Msg::VideoMode(true)));
+                boot.push(Task::done(Msg::Full(true)));
+            }
             Some("favoritos") => boot.push(Task::done(Msg::Nav(Page::Favorites))),
             Some("parati") => boot.push(Task::done(Msg::Nav(Page::ForYou))),
             Some(q) if q.starts_with("artista=") => boot.push(Task::done(Msg::Nav(Page::Artist(None, q["artista=".len()..].replace('_', " "))))),
@@ -242,6 +275,53 @@ impl App {
 
     pub fn current(&self) -> Option<Track> {
         self.status.as_ref()?.get("current").and_then(|c| serde_json::from_value(c.clone()).ok())
+    }
+
+    /// La posición del audio ahora mismo: la del último status más lo que pasó desde él.
+    pub fn position_now(&self) -> f64 {
+        let pos = self.playback("position").and_then(Value::as_f64).unwrap_or(0.0);
+        let paused = self.playback("paused").and_then(Value::as_bool).unwrap_or(true);
+        if paused { pos } else { pos + self.status_at.elapsed().as_secs_f64() }
+    }
+
+    /// Abre, cambia, sincroniza o suelta el video según lo que suena y lo que se ve.
+    fn sync_video(&mut self) -> Task<Msg> {
+        let cur = self.current().filter(|_| self.full && self.video_mode);
+        let Some(track) = cur else {
+            self.video = None;
+            return Task::none();
+        };
+        if self.video.as_ref().is_none_or(|(id, _)| *id != track.id) {
+            self.video = Some((track.id.clone(), video::State::Loading));
+            let id = track.id.clone();
+            let req = json!({ "cmd": "video_url", "track": track });
+            return Task::perform(api::ask(req), move |r| {
+                let url = r.and_then(|v| v.pointer("/payload/url").and_then(Value::as_str).map(str::to_owned).ok_or("sin URL de video".into()));
+                Msg::VideoUrl(id.clone(), url)
+            });
+        }
+        self.follow_video()
+    }
+
+    /// Si estaba en pantalla completa, vuelve a la ventana (al cerrar la vista o el video).
+    fn leave_screen(&mut self) -> Task<Msg> {
+        if self.video_layout != video::Layout::Screen {
+            return Task::none();
+        }
+        self.video_layout = self.video_back;
+        window_mode(window::Mode::Windowed)
+    }
+
+    /// Ajusta el video al audio: en cada status, en cada cuadro y justo cuando toca soltarlo.
+    fn follow_video(&mut self) -> Task<Msg> {
+        let pos = self.position_now();
+        let paused = self.playback("paused").and_then(Value::as_bool).unwrap_or(true);
+        if let Some((_, video::State::Ready(p))) = &mut self.video {
+            if let Some(wait) = p.follow(pos, paused) {
+                return Task::perform(tokio::time::sleep(wait), |_| Msg::VideoTick);
+            }
+        }
+        Task::none()
     }
 
     pub fn playback(&self, key: &str) -> Option<&Value> {
@@ -293,6 +373,10 @@ impl App {
         Task::perform(api::ask(req), move |r| Msg::Started(seq, r))
     }
 
+    pub fn is_disliked(&self, id: &str) -> bool {
+        self.library.disliked.iter().any(|t| t.id == id)
+    }
+
     pub fn is_favorite(&self, id: &str) -> bool {
         self.library.favorites.iter().any(|t| t.id == id)
     }
@@ -302,6 +386,8 @@ impl App {
             Msg::Frame(now) => {
                 let dt = now.saturating_duration_since(self.last).as_secs_f64().min(0.1);
                 self.last = now;
+                // Con cuadros llegando, el despertar de follow_video sobra.
+                let _ = self.follow_video();
                 if self.theme_check.elapsed() >= Duration::from_secs(1) {
                     self.theme_check = Instant::now();
                     theme::poll();
@@ -331,6 +417,7 @@ impl App {
             Msg::Status(v) => {
                 let before = self.current().map(|t| t.id);
                 self.status = v;
+                self.status_at = Instant::now();
                 // Un status pedido antes de la respuesta aún trae la pista vieja: esperar al
                 // que traiga la nueva (o un segundo, si el daemon sonó otra cosa).
                 let now_id = self.current().map(|t| t.id);
@@ -356,6 +443,7 @@ impl App {
                 if before != now.map(|t| t.id) {
                     tasks.push(reload_recent());
                 }
+                tasks.push(self.sync_video());
                 return Task::batch(tasks);
             }
             Msg::Library(Ok(lib)) => {
@@ -480,6 +568,17 @@ impl App {
                 }
                 return send(json!({ "cmd": "favorite", "track": t, "on": on }), true);
             }
+            Msg::Dislike(t, on) => {
+                self.library.disliked.retain(|f| f.id != t.id);
+                if on {
+                    self.library.favorites.retain(|f| f.id != t.id);
+                    self.library.disliked.insert(0, t.clone());
+                    if let Some(Ok(f)) = &mut self.for_you {
+                        f.tracks.retain(|x| x.id != t.id);
+                    }
+                }
+                return send(json!({ "cmd": "dislike", "track": t, "on": on }), true);
+            }
             Msg::Follow(a, on) => {
                 self.library.artists.retain(|x| x.id != a.id);
                 if on {
@@ -495,7 +594,55 @@ impl App {
                 return send(json!({ "cmd": "playlist_add", "id": id, "track": t }), true);
             }
             Msg::RemoveFrom(id, track_id) => return send(json!({ "cmd": "playlist_remove", "id": id, "track_id": track_id }), true),
-            Msg::NewPlaylist(name) => self.new_playlist = name,
+            Msg::NewPlaylist(name) => {
+                // Desde la barra reducida, el campo necesita la barra abierta.
+                if name.is_some() {
+                    self.rail = false;
+                }
+                self.new_playlist = name;
+            }
+            Msg::Rail(on) => self.rail = on,
+            Msg::VideoTick => return self.follow_video(),
+            Msg::VideoMode(on) => {
+                self.video_mode = on;
+                return Task::batch([self.leave_screen(), self.sync_video()]);
+            }
+            Msg::VideoLayout(l) => {
+                let was = self.video_layout;
+                if l == was {
+                    return Task::none();
+                }
+                self.video_layout = l;
+                if l == video::Layout::Screen {
+                    self.video_back = was;
+                    self.mouse_at = Instant::now();
+                    return window_mode(window::Mode::Fullscreen);
+                }
+                if was == video::Layout::Screen {
+                    return window_mode(window::Mode::Windowed);
+                }
+            }
+            Msg::MouseMoved => self.mouse_at = Instant::now(),
+            Msg::VideoUrl(id, r) => {
+                if self.video.as_ref().is_some_and(|(v, _)| *v == id) {
+                    match r {
+                        Ok(url) => return Task::perform(video::open(url), move |r| Msg::VideoOpened(id.clone(), r)),
+                        Err(e) => self.video = Some((id, video::State::Failed(e))),
+                    }
+                }
+            }
+            Msg::VideoOpened(id, r) => {
+                // Si ya no es la que suena, el Video se suelta aquí y GStreamer se cierra.
+                if self.video.as_ref().is_some_and(|(v, _)| *v == id) {
+                    let state = match r.map(|l| l.take()) {
+                        Ok(Some(v)) => video::State::Ready(video::Player::new(v)),
+                        Ok(None) => return Task::none(),
+                        Err(e) => video::State::Failed(e),
+                    };
+                    self.video = Some((id, state));
+                    return self.sync_video();
+                }
+            }
             Msg::CreatePlaylist => {
                 let Some(name) = self.new_playlist.take() else { return Task::none() };
                 return Task::perform(api::ask(json!({ "cmd": "playlist_create", "name": name })), |r| match r {
@@ -559,6 +706,8 @@ impl App {
                 self.full = on;
                 self.menu = None;
                 self.last = Instant::now();
+                let leave = if on { Task::none() } else { self.leave_screen() };
+                return Task::batch([leave, self.sync_video()]);
             }
             Msg::Lyrics(id, l) => {
                 if self.lyrics_for.as_ref() == Some(&id) {
@@ -580,6 +729,9 @@ impl App {
             }
             Msg::Key(key) => match key.as_ref() {
                 Key::Named(Named::Space) => return send(api::cmd("toggle"), false),
+                Key::Named(Named::Escape) if self.full && self.video_layout == video::Layout::Screen => {
+                    return self.update(Msg::VideoLayout(self.video_back));
+                }
                 Key::Named(Named::Escape) if self.full => self.full = false,
                 Key::Named(Named::Escape) if self.menu.is_some() => self.menu = None,
                 Key::Named(Named::Escape) | Key::Named(Named::Backspace) => return self.update(Msg::Back),
@@ -701,4 +853,8 @@ fn reload_recent() -> Task<Msg> {
 
 fn send(req: Value, library_changed: bool) -> Task<Msg> {
     Task::perform(api::ask(req), move |r| Msg::Done(r, library_changed))
+}
+
+fn window_mode(mode: window::Mode) -> Task<Msg> {
+    window::latest().and_then(move |id| window::set_mode(id, mode))
 }

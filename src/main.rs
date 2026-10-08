@@ -297,9 +297,16 @@ async fn dispatch(player: &Arc<Player>, req: Request) -> Response {
             player.warm(track);
             Response::ok("adelantando")
         }
+        Request::VideoUrl { track } => match player.video_url(&track).await {
+            Ok(url) => Response::data(serde_json::json!({ "url": url })),
+            Err(e) => Response::error(e.to_string()),
+        },
         Request::Library => Response::data(player.library.data().await),
         Request::Favorite { track, on } => {
             reply(player.library.set_favorite(track, on).await, if on { "en favoritos" } else { "fuera de favoritos" })
+        }
+        Request::Dislike { track, on } => {
+            reply(player.dislike(track, on).await, if on { "no te gusta" } else { "ya no está en no me gusta" })
         }
         Request::PlaylistCreate { name } => match player.library.create_playlist(&name).await {
             Ok(p) => Response::data(p),

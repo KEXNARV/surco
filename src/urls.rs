@@ -25,16 +25,22 @@ type Cell = Arc<OnceCell<(String, u64)>>;
 pub struct Urls {
     cells: Mutex<HashMap<String, Cell>>,
     http: reqwest::Client,
+    /// Las de audio (para mpv) o las de video (para verlo en la app).
+    video: bool,
 }
 
 impl Default for Urls {
     fn default() -> Self {
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4)).build().unwrap_or_default();
-        Self { cells: Default::default(), http }
+        Self { cells: Default::default(), http, video: false }
     }
 }
 
 impl Urls {
+    pub fn video() -> Self {
+        Self { video: true, ..Default::default() }
+    }
+
     /// La URL de `track`, ya comprobada: la guardada si sigue viva y YouTube la acepta, la
     /// que ya se está resolviendo, o una nueva.
     pub async fn get(&self, resolver: &dyn Resolver, track: &Track) -> Result<String> {
@@ -49,7 +55,8 @@ impl Urls {
             return Ok(url);
         }
         self.forget(&track.id);
-        anyhow::bail!("YouTube no deja abrir «{}» ahora mismo; prueba en un rato", track.title)
+        let what = if self.video { "el video de " } else { "" };
+        anyhow::bail!("YouTube no deja abrir {what}«{}» ahora mismo; prueba en un rato", track.title)
     }
 
     /// ¿YouTube deja leer la URL entera? Si el HEAD no llega (sin red, lento), se le da el
@@ -70,7 +77,7 @@ impl Urls {
         };
         let got = cell
             .get_or_try_init(|| async {
-                let url = resolver.stream_url(track).await?;
+                let url = if self.video { resolver.video_url(track).await? } else { resolver.stream_url(track).await? };
                 let exp = expiry(&url).unwrap_or(now() + DEFAULT_TTL).saturating_sub(MARGIN);
                 Ok::<_, anyhow::Error>((url, exp))
             })

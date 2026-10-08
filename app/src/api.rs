@@ -44,6 +44,8 @@ pub struct Library {
     pub playlists: Vec<Playlist>,
     #[serde(default)]
     pub artists: Vec<ArtistRef>,
+    #[serde(default)]
+    pub disliked: Vec<Track>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

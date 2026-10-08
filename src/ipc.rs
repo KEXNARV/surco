@@ -42,9 +42,13 @@ pub enum Request {
     ForYou { refresh: Option<bool> },
     /// Adelanta la URL de una pista que quizá suene pronto, sin tocar la cola.
     Warm { track: Track },
+    /// URL de solo video de una pista, para verla en la app.
+    VideoUrl { track: Track },
     /// Favoritos y playlists.
     Library,
     Favorite { track: Track, on: bool },
+    /// "No me gusta": si es la que suena, pasa a la siguiente.
+    Dislike { track: Track, on: bool },
     PlaylistCreate { name: String },
     PlaylistRename { id: String, name: String },
     PlaylistDelete { id: String },

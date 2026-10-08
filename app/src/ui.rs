@@ -5,13 +5,14 @@
 use std::time::Instant;
 
 use iced::widget::{
-    Column, Space, button, column, container, image, mouse_area, row, scrollable, shader, slider, stack, text, text_input,
+    Column, Space, button, column, container, image, mouse_area, row, scrollable, shader, slider, stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Background, Border, Color, ContentFit, Element, Fill, Length, Padding};
 use serde_json::Value;
 
 use crate::api::{Album, Artist, Item, Track};
-use crate::{App, Msg, Page, SEARCH_INPUT, SPACING, Thumb, cargando, puntos, theme};
+use crate::{App, Msg, Page, SEARCH_INPUT, SPACING, Thumb, cargando, puntos, theme, video};
+use iced_video_player::VideoPlayer;
 
 pub fn rgb(c: [f64; 3], a: f32) -> Color {
     Color::from_rgba8(c[0].round() as u8, c[1].round() as u8, c[2].round() as u8, a)
@@ -62,6 +63,12 @@ fn icon<'a>(glyph: &'a str, size: u32, color: Color) -> button::Button<'a, Msg> 
     })
 }
 
+/// "No me gusta", con su nombre al pasar el mouse: el icono solo no se entiende.
+fn dislike_icon<'a>(t: &Track, on: bool, size: u32) -> Element<'a, Msg> {
+    let b = icon("⊘", size, if on { accent() } else { faint() }).on_press(Msg::Dislike(t.clone(), !on));
+    hint_at(b, if on { "Quitar de no me gusta" } else { "No me gusta" }.into(), tooltip::Position::Top)
+}
+
 /// Avisa cuando el mouse entra o sale de una pista, para adelantar su URL.
 fn hoverable<'a>(content: impl Into<Element<'a, Msg>>, t: &Track) -> Element<'a, Msg> {
     mouse_area(content).on_enter(Msg::Hover(t.clone())).on_exit(Msg::Unhover(t.id.clone())).into()
@@ -82,6 +89,21 @@ fn who_link<'a>(t: &Track, size: u32) -> Element<'a, Msg> {
         })
         .on_press(Msg::Nav(page))
         .into()
+}
+
+/// El nombre que aparece a la derecha de un icono de la barra reducida.
+fn hint<'a>(content: impl Into<Element<'a, Msg>>, label: String) -> Element<'a, Msg> {
+    hint_at(content, label, tooltip::Position::Right)
+}
+
+/// Un nombre que aparece junto a un icono al pasar el mouse.
+fn hint_at<'a>(content: impl Into<Element<'a, Msg>>, label: String, at: tooltip::Position) -> Element<'a, Msg> {
+    let tip = container(text(label).size(13)).padding([4, 8]).style(|_| container::Style {
+        background: Some(rgb(theme::bg_rgb(), 0.97).into()),
+        border: Border { radius: 6.0.into(), width: 1.0, color: dim().scale_alpha(0.35) },
+        ..Default::default()
+    });
+    tooltip(content, tip, at).gap(6).into()
 }
 
 pub fn clock(s: f64) -> String {
@@ -133,6 +155,9 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Msg> {
         let t0 = Instant::now();
+        if self.full && self.video_mode && self.video_layout == video::Layout::Screen {
+            return self.screen_view();
+        }
         let body: Element<Msg> = if self.full {
             self.full_view()
         } else {
@@ -152,6 +177,9 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Msg> {
+        if self.rail {
+            return self.rail_view();
+        }
         let nav = |label: &'static str, page: Page| flat(text(label).size(15), self.page == page).width(Fill).on_press(Msg::Nav(page));
         let mut lib = Column::new().spacing(2);
         lib = lib.push(
@@ -161,12 +189,10 @@ impl App {
         );
         for a in &self.library.artists {
             let page = Page::Artist(Some(a.id.clone()), a.name.clone());
-            let photo: Element<Msg> = match self.thumbs.get(&format!("foto:{}", a.id)) {
-                Some(Thumb::Ready(h)) => image(h.clone()).width(26).height(26).content_fit(ContentFit::Cover).border_radius(13.0).into(),
-                _ => text("◉").color(faint()).into(),
-            };
             lib = lib.push(
-                flat(row![photo, text(&a.name).size(14)].spacing(8).align_y(Alignment::Center), self.page == page).width(Fill).on_press(Msg::Nav(page)),
+                flat(row![self.artist_photo(&a.id), text(&a.name).size(14)].spacing(8).align_y(Alignment::Center), self.page == page)
+                    .width(Fill)
+                    .on_press(Msg::Nav(page)),
             );
         }
         for p in &self.library.playlists {
@@ -186,7 +212,8 @@ impl App {
         };
         panel(
             column![
-                text("s u r c o").size(18).color(accent()),
+                row![text("s u r c o").size(18).color(accent()), Space::new().width(Fill), icon("«", 16, faint()).on_press(Msg::Rail(true))]
+                    .align_y(Alignment::Center),
                 Space::new().height(12),
                 nav("◇  Inicio", Page::Home),
                 nav("✦  Para ti", Page::ForYou),
@@ -200,6 +227,55 @@ impl App {
             .padding(14),
         )
         .width(240)
+        .height(Fill)
+        .into()
+    }
+
+    fn artist_photo(&self, id: &str) -> Element<'_, Msg> {
+        match self.thumbs.get(&format!("foto:{id}")) {
+            Some(Thumb::Ready(h)) => image(h.clone()).width(26).height(26).content_fit(ContentFit::Cover).border_radius(13.0).into(),
+            _ => text("◉").color(faint()).into(),
+        }
+    }
+
+    fn rail_cell<'a>(&self, glyph: Element<'a, Msg>, label: String, page: Page) -> Element<'a, Msg> {
+        let active = self.page == page;
+        hint(flat(container(glyph).center_x(Fill), active).width(Fill).padding([6, 0]).on_press(Msg::Nav(page)), label)
+    }
+
+    /// La barra reducida: solo iconos, con el nombre al pasar el mouse.
+    fn rail_view(&self) -> Element<'_, Msg> {
+        let cell = |glyph, label, page| self.rail_cell(glyph, label, page);
+        let mut lib = Column::new().spacing(2);
+        lib = lib.push(cell(text("♥").color(accent()).into(), format!("Favoritos  {}", self.library.favorites.len()), Page::Favorites));
+        for a in &self.library.artists {
+            lib = lib.push(cell(self.artist_photo(&a.id), a.name.clone(), Page::Artist(Some(a.id.clone()), a.name.clone())));
+        }
+        for p in &self.library.playlists {
+            lib = lib.push(cell(text("▤").color(faint()).into(), p.name.clone(), Page::Playlist(p.id.clone())));
+        }
+        let create = hint(
+            flat(container(text("+").size(16).color(faint())).center_x(Fill), false)
+                .width(Fill)
+                .padding([6, 0])
+                .on_press(Msg::NewPlaylist(Some(String::new()))),
+            "Nueva playlist".into(),
+        );
+        panel(
+            column![
+                container(icon("»", 16, faint()).on_press(Msg::Rail(false))).center_x(Fill),
+                Space::new().height(12),
+                cell(text("◇").size(15).into(), "Inicio".into(), Page::Home),
+                cell(text("✦").size(15).into(), "Para ti".into(), Page::ForYou),
+                cell(text("⌕").size(15).into(), "Buscar".into(), Page::Search),
+                Space::new().height(16),
+                scrollable(lib).height(Fill),
+                create,
+            ]
+            .spacing(4)
+            .padding([14, 6]),
+        )
+        .width(56)
         .height(Fill)
         .into()
     }
@@ -505,9 +581,11 @@ impl App {
         for (i, t) in tracks.iter().enumerate() {
             let now = playing.as_deref() == Some(&t.id);
             let fav = self.is_favorite(&t.id);
-            let title_color = if now { accent() } else { fg() };
+            let bad = self.is_disliked(&t.id);
+            let title_color = if now { accent() } else if bad { faint() } else { fg() };
             let mut tail = row![
                 text(t.duration.map(clock).unwrap_or_default()).size(12).color(faint()).width(48),
+                dislike_icon(t, bad, 15),
                 icon(if fav { "♥" } else { "♡" }, 15, if fav { accent() } else { faint() }).on_press(Msg::Favorite(t.clone(), !fav)),
                 icon("+", 16, faint()).on_press(Msg::Menu(if self.menu.as_deref() == Some(&t.id) { None } else { Some(t.id.clone()) })),
             ]
@@ -573,7 +651,12 @@ impl App {
                 let art = mouse_area(self.cover_loading(&t.id, 52.0)).on_press(Msg::Full(!self.full)).interaction(iced::mouse::Interaction::Pointer);
                 let name = mouse_area(text(short(&clean(t), 30)).size(14)).on_press(Msg::Full(!self.full)).interaction(iced::mouse::Interaction::Pointer);
                 let info = row![art, column![name, who_link(t, 12)].spacing(2)].spacing(12).align_y(Alignment::Center);
-                row![info, icon(if fav { "♥" } else { "♡" }, 16, if fav { accent() } else { faint() }).on_press(Msg::Favorite(t.clone(), !fav))]
+                let bad = self.is_disliked(&t.id);
+                row![
+                    info,
+                    dislike_icon(t, bad, 16),
+                    icon(if fav { "♥" } else { "♡" }, 16, if fav { accent() } else { faint() }).on_press(Msg::Favorite(t.clone(), !fav)),
+                ]
                     .spacing(10)
                     .align_y(Alignment::Center)
                     .into()
@@ -630,16 +713,81 @@ impl App {
     }
 
     /// El núcleo de Iris a pantalla completa, con el título y la letra encima.
+    /// El video, o lo que se ve mientras llega. `None` si no hay video que mostrar.
+    fn video_area(&self) -> Option<Element<'_, Msg>> {
+        if !self.video_mode {
+            return None;
+        }
+        match self.video.as_ref().map(|(_, s)| s) {
+            Some(video::State::Ready(p)) => Some(VideoPlayer::new(&p.video).width(Fill).height(Fill).content_fit(ContentFit::Contain).into()),
+            Some(video::State::Loading) => Some(container(self.waiting_line("cargando video…".into())).center(Fill).into()),
+            _ => None,
+        }
+    }
+
+    /// Los botones del video, juntos en una cápsula arriba a la derecha.
+    fn video_controls(&self) -> Element<'_, Msg> {
+        let opt = |label: &'static str, on: bool, msg: Msg| flat(text(label).size(13), on).padding([4, 10]).on_press(msg);
+        let mut r = row![].spacing(2).align_y(Alignment::Center);
+        if self.video_mode {
+            let l = self.video_layout;
+            r = r
+                .push(opt("◉ núcleo", false, Msg::VideoMode(false)))
+                .push(opt("▯ lateral", l == video::Layout::Side, Msg::VideoLayout(video::Layout::Side)))
+                .push(opt("▭ panorámica", l == video::Layout::Wide, Msg::VideoLayout(video::Layout::Wide)));
+            r = if l == video::Layout::Screen {
+                r.push(opt("⛶ salir", false, Msg::VideoLayout(self.video_back)))
+            } else {
+                r.push(opt("⛶ pantalla completa", false, Msg::VideoLayout(video::Layout::Screen)))
+            };
+        } else {
+            r = r.push(opt("▶ video", false, Msg::VideoMode(true)));
+        }
+        container(r)
+            .padding(3)
+            .style(|_| container::Style {
+                background: Some(rgb(theme::bg_rgb(), 0.8).into()),
+                border: Border { radius: 9.0.into(), width: 1.0, color: dim().scale_alpha(0.4) },
+                ..Default::default()
+            })
+            .into()
+    }
+
+    /// Pantalla completa: solo el video; los controles salen al mover el mouse.
+    fn screen_view(&self) -> Element<'_, Msg> {
+        let video = self.video_area().unwrap_or_else(|| {
+            let e = match &self.video {
+                Some((_, video::State::Failed(e))) => e.clone(),
+                _ => "sin video".into(),
+            };
+            container(text(e).color(faint())).center(Fill).into()
+        });
+        let mut layers = stack![container(video).width(Fill).height(Fill).style(|_| container::Style {
+            background: Some(Color::BLACK.into()),
+            ..Default::default()
+        })];
+        if self.mouse_at.elapsed() < std::time::Duration::from_millis(2500) {
+            layers = layers.push(container(self.video_controls()).width(Fill).align_x(Alignment::End).padding(16));
+        }
+        mouse_area(layers).on_move(|_| Msg::MouseMoved).into()
+    }
+
     fn full_view(&self) -> Element<'_, Msg> {
+        let wide = self.video_mode && self.video_layout != video::Layout::Side;
         // El núcleo ocupa la izquierda (3/5) y la letra la derecha: encima se tapaban.
         let (w, h) = ((self.size.width - 16.0) * 0.6, (self.size.height - 84.0 - 24.0).max(50.0));
-        let dots = self
-            .core
-            .dots((w / SPACING) as usize, (h / SPACING) as usize)
-            .into_iter()
-            .map(|(pos, color)| puntos::Dot { pos, color })
-            .collect();
-        let nucleo = shader(puntos::Puntos { dots, spacing: SPACING }).width(Fill).height(Fill);
+        let backdrop: Element<Msg> = match self.video_area() {
+            Some(v) => v,
+            None => {
+                let dots = self
+                    .core
+                    .dots((w / SPACING) as usize, (h / SPACING) as usize)
+                    .into_iter()
+                    .map(|(pos, color)| puntos::Dot { pos, color })
+                    .collect();
+                shader(puntos::Puntos { dots, spacing: SPACING }).width(Fill).height(Fill).into()
+            }
+        };
 
         let cur = self.current();
         let pos = self.playback("position").and_then(Value::as_f64).unwrap_or(0.0);
@@ -658,21 +806,24 @@ impl App {
             Some(l) if l.plain.is_some() => lyr = lyr.push(text(l.plain.clone().unwrap_or_default()).size(15).color(faint())),
             _ => lyr = lyr.push(text("sin letra").size(14).color(faint())),
         }
-        let info = column![
+        let mut info = column![
             text(cur.as_ref().map(clean).unwrap_or_else(|| "nada sonando".into())).size(30),
             cur.as_ref().map(|t| who_link(t, 16)).unwrap_or_else(|| Space::new().into()),
         ]
         .spacing(6);
-        let left = stack![nucleo, container(info).width(Fill).height(Fill).align_y(Alignment::End).padding(28)];
-        panel(
-            row![
-                container(left).width(Length::FillPortion(3)).height(Fill),
-                container(lyr).width(Length::FillPortion(2)).height(Fill).align_y(Alignment::Center).padding(28),
-            ],
-        )
-        .width(Fill)
-        .height(Fill)
-        .into()
+        if let (true, Some((_, video::State::Failed(e)))) = (self.video_mode, &self.video) {
+            info = info.push(text(e.clone()).size(13).color(faint()));
+        }
+        let left = stack![
+            backdrop,
+            container(info).width(Fill).height(Fill).align_y(Alignment::End).padding(28),
+            container(self.video_controls()).width(Fill).align_x(Alignment::End).padding(14),
+        ];
+        let mut body = row![container(left).width(Length::FillPortion(3)).height(Fill)];
+        if !wide {
+            body = body.push(container(lyr).width(Length::FillPortion(2)).height(Fill).align_y(Alignment::Center).padding(28));
+        }
+        panel(body).width(Fill).height(Fill).into()
     }
 }
 

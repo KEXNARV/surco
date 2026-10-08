@@ -79,6 +79,20 @@ Para ver los logs:
     surco lyrics                 # letras que siguen la cancion
     surco kill
 
+## App
+
+`app/` es la interfaz gráfica (iced sobre wgpu): biblioteca, "para ti",
+favoritos, "no me gusta", playlists y una vista completa con letra o con el
+video musical (lateral, panorámica o pantalla completa).
+
+    cd app && cargo build --release
+    ./target/release/surco-app
+
+Habla con el mismo daemon que el CLI. El video necesita GStreamer
+(`gstreamer`, `gst-plugins-base`, `gst-plugins-good`, `gst-plugins-bad`; en
+Arch con esos nombres). El audio sigue saliendo de mpv: la app reproduce
+aparte el stream de solo video y lo mantiene a la par de lo que suena.
+
 ## Letras
 
     surco lyrics

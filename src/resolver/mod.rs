@@ -49,4 +49,8 @@ pub trait Resolver: Send + Sync {
     /// Consigue la URL reproducible. Se llama justo antes de sonar porque
     /// las URLs de googlevideo caducan y estan atadas a la IP que las pidio.
     async fn stream_url(&self, track: &Track) -> Result<String>;
+    /// La URL de solo video, para verlo en la app mientras el audio sale de mpv.
+    async fn video_url(&self, _track: &Track) -> Result<String> {
+        anyhow::bail!("esta fuente no tiene video")
+    }
 }
